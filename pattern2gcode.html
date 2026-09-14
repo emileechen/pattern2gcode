@@ -64,6 +64,10 @@
   #pageNav button:hover:not(:disabled), #canvasBar button.bar:hover:not(:disabled){background:var(--ink); color:var(--paper)}
   #pageNav button:disabled, #canvasBar button.bar:disabled{opacity:.3; cursor:default}
   #canvasBar button.bar{font-weight:600; font-size:13px}
+  #viewSeg button{border-radius:0}
+  #viewSeg button:first-child{border-radius:6px 0 0 6px}
+  #viewSeg button:last-child{border-radius:0 6px 6px 0; margin-left:-1.5px}
+  #viewSeg button.on{background:var(--ink); color:var(--paper)}
   #pageNav .lbl{font:13px var(--mono); min-width:64px; text-align:center}
 
   section{margin:0 0 22px}
@@ -156,7 +160,11 @@
     </div>
     <span style="font-size:13.5px;margin-left:8px">Zoom</span>
     <input type="range" id="zoom" min="30" max="500" value="100" style="width:140px;accent-color:var(--thread)">
-    <button id="btnFit" class="bar" disabled title="Zoom so the whole page is visible">Fit</button>
+    <button id="btnFit" class="bar" disabled title="Zoom so everything is visible">Fit</button>
+    <span id="viewSeg" style="display:flex;gap:0;margin-left:8px">
+      <button id="viewPage" class="bar on" disabled title="The pattern page">Page</button>
+      <button id="viewBeds" class="bar" disabled title="How kept pieces pack onto print beds">Beds</button>
+    </span>
     <span class="hint" id="canvasHint">Load a PDF to begin</span>
   </div>
   <div id="editBar" hidden>
@@ -253,6 +261,7 @@
     <div class="row"><label>Pack several pieces per bed</label><input type="checkbox" id="pack" checked></div>
     <div class="row"><label>Spacing between pieces (mm)</label><input type="number" id="gap" value="8" min="2" max="40" step="1"></div>
     <div class="row"><label>Rotate 90° if needed to fit — <b>breaks grain</b></label><input type="checkbox" id="autoRot"></div>
+    <button class="act ghost" id="btnBeds" disabled>Preview bed layout</button>
     <button class="act ghost" id="btnSVG" disabled>Download SVGs</button>
     <button class="act" id="btnGcode" disabled>Download G-code</button>
     <div class="note">Grain arrows are detected inside each piece (blue arrows on the canvas; green if set by hand). Each piece is rotated so its grain runs along the bed's Y axis — lay your fabric with its grain along Y every time. Pieces marked "no grain found" won't be rotated: check them and use the Grain button to tap the arrow's two ends yourself. When packing is on, kept pieces are grouped onto as few beds as possible (one G-code file per bed, plus a matching SVG layout sheet). Pieces larger than the bed are skipped and flagged.</div>
@@ -278,6 +287,8 @@ const S = {
   zoom:1,
   sel:null,           // selected piece (edit mode)
   pdfInfo:null,       // {name,size,pages,hash,pageMM} of the loaded PDF
+  view:'page',        // 'page' | 'beds'
+  bedHits:[],         // placed polygons in bed view, for click selection
   pendingProject:null,// project loaded before its PDF
 };
 const $ = id => document.getElementById(id);
@@ -329,7 +340,7 @@ $('fileInput').addEventListener('change', async e=>{
     $('sec1').classList.remove('collapsed'); $('sec2').classList.remove('collapsed');
     $('sum1').textContent=''; $('sum2').textContent='';
     await showPage(1);
-    $('btnFit').disabled=false; fitPage();
+    $('btnFit').disabled=false; $('viewPage').disabled=false; fitPage();
     $('btnDetect').disabled = false; $('btnSaveProj').disabled = false;
     setStatus('PDF loaded — '+S.pdf.numPages+' pages, all included. Untick pages to omit them, then detect.');
     // a project loaded before its PDF, or autosaved work for this PDF?
@@ -379,6 +390,7 @@ async function renderFor(num){
 
 async function showPage(num){
   setStatus('Rendering page '+num+'…');
+  setView('page', false);
   S.pageNum = num; $('pageSel').value = num;
   $('pgLbl').textContent = num+' / '+S.pdf.numPages;
   $('pgPrev').disabled = num<=1;
@@ -686,12 +698,89 @@ function alignedPoly(p){
 /* ---------------- canvas & refinement ---------------- */
 $('zoom').addEventListener('input', draw);
 /* zoom so the whole page fits inside the canvas area */
+/* ---------------- bed layout preview ---------------- */
+const BED_GAP_MM=25, BED_LABEL_MM=12;
+/* pack (or one bed per piece) and arrange beds in a grid; sizes in mm plus
+   the pixel size the grid would have at zoom 100% */
+function bedLayout(){
+  const kept=S.pieces.filter(p=>p.on);
+  const bedX=+$('bedX').value, bedY=+$('bedY').value;
+  let sheets;
+  if($('pack').checked) sheets=packSheets(kept, bedX, bedY, +$('gap').value);
+  else sheets=kept.filter(p=>fitInfo(p).ok).map(p=>{ const f=fitInfo(p);
+    return {items:[{p, x:(bedX-f.w)/2, y:(bedY-f.h)/2, rot:f.rot}]}; });
+  const skipped=kept.filter(p=>!fitInfo(p).ok);
+  const n=Math.max(1,sheets.length);
+  const cols=Math.max(1, Math.min(n, Math.round(Math.sqrt(n*bedY/bedX*1.3))));
+  const rows=Math.ceil(n/cols);
+  const cellW=bedX+BED_GAP_MM, cellH=bedY+BED_LABEL_MM+BED_GAP_MM;
+  const wmm=cols*cellW-BED_GAP_MM+2*BED_GAP_MM, hmm=rows*cellH-BED_GAP_MM+2*BED_GAP_MM;
+  const base=1100/wmm;                                     // px per mm at zoom 100%
+  return {sheets, skipped, bedX, bedY, cols, rows, cellW, cellH, wmm, hmm, base, w100:wmm*base, h100:hmm*base};
+}
+function drawBeds(){
+  const cv=$('cv'), L=bedLayout();
+  const k=+$('zoom').value/100*L.base;                     // px per mm
+  S.zoom=k; S.bedHits=[];
+  cv.width=Math.round(L.wmm*k); cv.height=Math.round(L.hmm*k);
+  const ctx=cv.getContext('2d');
+  ctx.fillStyle='#E4DED2'; ctx.fillRect(0,0,cv.width,cv.height);
+  const fontPx=Math.max(10, Math.min(16, 4*k));
+  L.sheets.forEach((sh,i)=>{
+    const ox=BED_GAP_MM+(i%L.cols)*L.cellW, oy=BED_GAP_MM+Math.floor(i/L.cols)*L.cellH+BED_LABEL_MM;
+    // label
+    ctx.font='700 '+fontPx+'px system-ui'; ctx.fillStyle='#26221C'; ctx.textBaseline='bottom';
+    ctx.fillText('Bed '+(i+1)+' — '+sh.items.length+' piece'+(sh.items.length===1?'':'s')
+      +' · '+L.bedX+'×'+L.bedY+' mm', ox*k, (oy-2)*k);
+    // bed with 5 mm margin guide
+    ctx.fillStyle='#fff'; ctx.fillRect(ox*k, oy*k, L.bedX*k, L.bedY*k);
+    ctx.strokeStyle='#26221C'; ctx.lineWidth=1.5; ctx.strokeRect(ox*k, oy*k, L.bedX*k, L.bedY*k);
+    ctx.setLineDash([4,4]); ctx.strokeStyle='#b9b2a5'; ctx.lineWidth=1;
+    ctx.strokeRect((ox+5)*k, (oy+5)*k, (L.bedX-10)*k, (L.bedY-10)*k); ctx.setLineDash([]);
+    for(const it of sh.items){
+      const pts=placedPoly(it).map(([x,y])=>[x+ox, y+oy]);
+      S.bedHits.push({p:it.p, pts});
+      const sel=S.sel===it.p;
+      ctx.beginPath(); pts.forEach(([x,y],j)=> j?ctx.lineTo(x*k,y*k):ctx.moveTo(x*k,y*k)); ctx.closePath();
+      ctx.fillStyle = it.rot ? 'rgba(179,64,47,.18)' : (sel ? 'rgba(57,83,107,.25)' : 'rgba(179,64,47,.10)');
+      ctx.fill();
+      ctx.strokeStyle = sel ? '#39536B' : (it.rot ? '#B3402F' : '#26221C'); ctx.lineWidth = sel ? 2.5 : 1.2; ctx.stroke();
+      // name + rotation warning
+      ctx.font='600 '+Math.max(9,Math.min(13,3.2*k))+'px system-ui'; ctx.textBaseline='top';
+      ctx.fillStyle='#B3402F';
+      ctx.fillText(it.p.name+(it.rot?' ↻90° grain broken':''), (it.x+ox+2)*k, (it.y+oy+2)*k);
+    }
+  });
+  const hint = L.sheets.length+' bed'+(L.sheets.length===1?'':'s')
+    +(L.skipped.length?' · '+L.skipped.length+' too big, skipped':'')
+    +' · tap a piece to select it · Page to edit';
+  $('canvasHint').textContent=hint;
+}
+function setView(v, refit=true){
+  if(S.view===v && v==='beds' && !refit) return;
+  const changed=S.view!==v;
+  S.view=v;
+  $('viewPage').classList.toggle('on', v==='page'); $('viewBeds').classList.toggle('on', v==='beds');
+  $('canvasWrap').classList.toggle('beds', v==='beds');
+  if(!S.imgCanvas) return;
+  if(changed && refit) fitPage(); else draw();
+}
+$('viewPage').addEventListener('click', ()=>setView('page'));
+$('viewBeds').addEventListener('click', ()=>setView('beds'));
+$('btnBeds').addEventListener('click', ()=>setView('beds'));
+
 function fitPage(){
   if(!S.imgCanvas) return;
   const wrap=$('canvasWrap');
-  const base=Math.min(1, 1100/S.imgCanvas.width);        // same base scale draw() uses
-  const fit=Math.min((wrap.clientWidth-32)/(S.imgCanvas.width*base),
-                     (wrap.clientHeight-32)/(S.imgCanvas.height*base));
+  let fit;
+  if(S.view==='beds'){
+    const L=bedLayout();                                   // natural size at zoom 100%
+    fit=Math.min((wrap.clientWidth-32)/L.w100, (wrap.clientHeight-32)/L.h100);
+  }else{
+    const base=Math.min(1, 1100/S.imgCanvas.width);        // same base scale draw() uses
+    fit=Math.min((wrap.clientWidth-32)/(S.imgCanvas.width*base),
+                 (wrap.clientHeight-32)/(S.imgCanvas.height*base));
+  }
   const z=$('zoom');
   z.value=Math.max(+z.min, Math.min(+z.max, Math.floor(fit*100)));
   draw();
@@ -700,6 +789,7 @@ function fitPage(){
 $('btnFit').addEventListener('click', fitPage);
 function draw(){
   const cv=$('cv'); if(!S.imgCanvas){ return; }
+  if(S.view==='beds'){ drawBeds(); return; }
   const z = +$('zoom').value/100 * Math.min(1, 1100/S.imgCanvas.width);
   S.zoom=z;
   cv.width = Math.round(S.imgCanvas.width*z);
@@ -802,7 +892,7 @@ function canvasMM(e){
 }
 /* which handle of the selected piece is under the pointer? */
 function hitHandle(mmX, mmY){
-  const p=S.sel; if(!p || p.page!==S.pageNum) return null;
+  const p=S.sel; if(!p || p.page!==S.pageNum || S.view!=='page') return null;
   const pxPerMM=S.zoom/S.mmPerPx;
   if(!handlesVisible(p,pxPerMM)) return null;
   // nearest handle wins; each kind has its own grab radius
@@ -839,7 +929,7 @@ function selectPiece(p, opts={}){
   $('edKeep').className = p.on ? 'warn' : '';
   $('edReset').disabled = p.poly.length===p.poly0.length && p.poly.every((q,i)=>q[0]===p.poly0[i][0]&&q[1]===p.poly0[i][1]);
   refreshPieceUI();
-  if(opts.frame!==false) framePiece(p, opts.zoom!==false);   // selecting zooms to fit the piece
+  if(opts.frame!==false && S.view==='page') framePiece(p, opts.zoom!==false);   // selecting zooms to fit the piece
   draw();
 }
 /* scroll (and optionally zoom) so the piece is in view */
@@ -871,7 +961,7 @@ function renamePiece(p){
          if(S.sel===p) selectPiece(p,{frame:false}); else { refreshPieceUI(); draw(); } }
 }
 async function startGrainPick(p){
-  if(p.page!==S.pageNum) await showPage(p.page);
+  if(p.page!==S.pageNum || S.view!=='page') await showPage(p.page);
   S.grainPick={piece:p, pt:null};
   $('canvasWrap').classList.add('picking');
   setStatus('Tap one end of '+p.name+"'s grain arrow on the canvas, then the other end.");
@@ -958,8 +1048,13 @@ $('cv').addEventListener('click', e=>{
   }
   // topmost smallest piece containing the point
   let hit=null;
-  for(const p of S.pieces.filter(p=>p.page===S.pageNum))
-    if(pointInPoly(mmX,mmY,p.poly) && (!hit || p.bb.w*p.bb.h < hit.bb.w*hit.bb.h)) hit=p;
+  if(S.view==='beds'){
+    const bx=(e.clientX-r.left)/S.zoom, by=(e.clientY-r.top)/S.zoom;     // S.zoom is px/mm here
+    for(const h of S.bedHits) if(pointInPoly(bx,by,h.pts)){ hit=h.p; break; }
+  }else{
+    for(const p of S.pieces.filter(p=>p.page===S.pageNum))
+      if(pointInPoly(mmX,mmY,p.poly) && (!hit || p.bb.w*p.bb.h < hit.bb.w*hit.bb.h)) hit=p;
+  }
   if(hit===S.sel) return;                      // already selected — leave it
   selectPiece(hit);                            // null deselects
 });
@@ -1044,7 +1139,7 @@ function refreshPieceUI(){
     card.querySelector('.nm').textContent=p.name;
     card.onclick=async e=>{
       if(e.target.tagName==='BUTTON' || e.target.classList.contains('nm')) return;
-      if(p.page!==S.pageNum) await showPage(p.page);
+      if(S.view==='page' && p.page!==S.pageNum) await showPage(p.page);
       selectPiece(p);
     };
     card.querySelector('.nm').onclick=()=>renamePiece(p);
@@ -1054,7 +1149,9 @@ function refreshPieceUI(){
   }
   const selCard=list.querySelector('.sel'); if(selCard) selCard.scrollIntoView({block:'nearest'});
   const any=S.pieces.some(p=>p.on);
-  $('btnSVG').disabled=$('btnGcode').disabled=!any;
+  $('btnSVG').disabled=$('btnGcode').disabled=$('btnBeds').disabled=$('viewBeds').disabled=!any;
+  if(!any && S.view==='beds') setView('page');
+  if(S.view==='beds' && S.imgCanvas) draw();               // packing settings may have changed
   scheduleAutosave();
 }
 ['bedX','bedY','autoRot'].forEach(id=>$(id).addEventListener('change',refreshPieceUI));
