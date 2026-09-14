@@ -590,8 +590,8 @@ function detectPieces(imgData, mmPerPx, thr, minPieceMM, gapMM, hi){
       const bb={minX:Math.min(...xs), maxX:Math.max(...xs),
                 minY:Math.min(...ys), maxY:Math.max(...ys)};
       bb.w=bb.maxX-bb.minX; bb.h=bb.maxY-bb.minY;
-      const grain = findGrain(lbl, dark, w, h, pt.pid, pt.minx, pt.miny, pt.maxx, pt.maxy, mmPerPx, poly);
       const ticks = findJunctions(lbl, dark, w, h, pt.pid, pt.minx, pt.miny, pt.maxx, pt.maxy, mmPerPx, poly);
+      const grain = findGrain(lbl, dark, w, h, pt.pid, pt.minx, pt.miny, pt.maxx, pt.maxy, mmPerPx, poly, ticks);
       anchorTicksToVertices(poly, ticks);
       for(const t of ticks) t.ai=t.vi;
       const path=pathFromPoly(poly, new Set(ticks.map(t=>t.vi)));
@@ -726,7 +726,8 @@ function rdp(pts, eps){
 
 /* ---------------- grain detection ---------------- */
 /* Find the grain arrow: the longest thin straight ink component well inside the piece. */
-function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly){
+function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly, junctions){
+  const jpx=(junctions||[]).map(t=>[t.x/mmPerPx-minx, t.y/mmPerPx-miny]);   // where lines meet the outline, local px
   const distToPoly=(x,y)=>{                  // min distance (mm) from point to outline
     let dmin=1e9;
     for(let i=0,j=poly.length-1;i<poly.length;j=i++){
@@ -780,21 +781,11 @@ function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly){
       }
     }
   }
-  // connected components of interior ink; PCA each; keep thin, long ones
-  const seen=new Uint8Array(n), q=new Int32Array(n);
   const minLenPx=25/mmPerPx, minArrowPx=12/mmPerPx;   // a plain line must be 25 mm; one with an arrowhead only 12 mm
-  let best=null;
-  for(let s=0;s<n;s++){
-    if(!ink[s]||seen[s]) continue;
-    let head=0, tail=0; q[tail++]=s; seen[s]=1;
-    let sx=0,sy=0,c=0; const px=[];
-    while(head<tail){
-      const i=q[head++], x=i%bw, y=(i-x)/bw;
-      px.push([x,y]); sx+=x; sy+=y; c++;
-      const t=j=>{ if(ink[j]&&!seen[j]){seen[j]=1;q[tail++]=j;} };
-      if(x>0)t(i-1); if(x<bw-1)t(i+1); if(y>0)t(i-bw); if(y<bh-1)t(i+bw);
-    }
-    if(c<minLenPx*0.7) continue;             // too little ink to be an arrow
+  // candidate evaluation: a set of ink pixels (local bbox coords) → grain line or null
+  const evalLine=(px)=>{
+    const c=px.length; if(c<minArrowPx*0.7) return null;     // too little ink to be an arrow
+    let sx=0,sy=0; for(const [x,y] of px){sx+=x; sy+=y;}
     const mx=sx/c, my=sy/c;
     let sxx=0,sxy=0,syy=0;
     for(const [x,y] of px){const dx=x-mx,dy=y-my; sxx+=dx*dx; sxy+=dx*dy; syy+=dy*dy;}
@@ -802,13 +793,13 @@ function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly){
     const tr=(sxx+syy)/2, dt=Math.sqrt(((sxx-syy)/2)**2+sxy*sxy);
     const l1=tr+dt, l2=Math.max(tr-dt,1e-6);
     const aspect=Math.sqrt(l1/l2);
-    if(aspect<3.5) continue;                 // rectangles, text, blobs
+    if(aspect<3.5) return {reject:'aspect'};              // rectangles, text, blobs
     let th=0.5*Math.atan2(2*sxy, sxx-syy);
     let ux=Math.cos(th), uy=Math.sin(th);
     let t0=1e9,t1=-1e9;
     for(const [x,y] of px){const t=(x-mx)*ux+(y-my)*uy; if(t<t0)t0=t; if(t>t1)t1=t;}
     let len=t1-t0;
-    if(len<minArrowPx) continue;
+    if(len<minArrowPx) return null;
     // arrowheads (often a single barb on one side) pull the fit off-axis:
     // refit on the middle 60% of the line — shaft only — then re-measure ends
     {
@@ -828,31 +819,101 @@ function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly){
     // grain arrows float free inside the piece; hem/seam lines run to the outline
     const e1x=(minx+mx+t0*ux)*mmPerPx, e1y=(miny+my+t0*uy)*mmPerPx;
     const e2x=(minx+mx+t1*ux)*mmPerPx, e2y=(miny+my+t1*uy)*mmPerPx;
-    if(distToPoly(e1x,e1y)<3.5 || distToPoly(e2x,e2y)<3.5) continue;
+    if(distToPoly(e1x,e1y)<3.5 || distToPoly(e2x,e2y)<3.5) return null;
+    // a line whose extension passes through a junction just beyond an end is
+    // the edge of a box or seam frame meeting the outline, not an arrow
+    for(const [jx,jy] of jpx){
+      const t=(jx-mx)*ux+(jy-my)*uy, v=Math.abs(-(jx-mx)*uy+(jy-my)*ux);
+      if(v<=2.5 && t>t0-6 && t<t1+6) return null;
+    }
     { const d1=distToPoly(e1x,e1y), d2=distToPoly(e2x,e2y), dm=distToPoly((e1x+e2x)/2,(e1y+e2y)/2);
-      if(Math.max(d1,d2,dm)-Math.min(d1,d2,dm)<2 && dm<25) continue; }   // parallel to the edge: a seam line
+      if(Math.max(d1,d2,dm)-Math.min(d1,d2,dm)<2 && dm<25) return null; }   // parallel to the edge: a seam line
     // an arrowhead: pixels near an end spread well beyond the shaft's width.
-    // A line with one always beats a longer plain line (seam-line fragment,
-    // placement box edge).
     let barb=false;
     {
-      const vx=-uy, vy=ux, mid=[], endS=[0,0];
+      const vx=-uy, vy=ux, mid=[], ends=[[],[]];
       for(const [x,y] of px){
         const t=(x-mx)*ux+(y-my)*uy, v=Math.abs((x-mx)*vx+(y-my)*vy), f=(t-t0)/len;
         if(f>0.25&&f<0.75) mid.push(v);
-        else if(f<0.12) endS[0]=Math.max(endS[0],v);
-        else if(f>0.88) endS[1]=Math.max(endS[1],v);
+        else if(f<0.12) ends[0].push([t,v]);
+        else if(f>0.88) ends[1].push([t,v]);
       }
       mid.sort((a,b)=>a-b);
       const shaft=mid.length? mid[Math.floor(mid.length*0.9)] : 1;      // 90th percentile half-width
       const need=Math.max(2.5*shaft, 1.2/mmPerPx);
-      barb = endS[0]>need || endS[1]>need;
+      // a barb runs diagonally back from the tip, so its lateral spread comes
+      // with a comparable spread along the shaft; a line crossing the end
+      // (a T-junction with a box side) is lateral only
+      for(const e of ends){
+        const off=e.filter(([t,v])=>v>shaft+1);
+        if(off.length<4) continue;
+        const vMax=Math.max(...off.map(o=>o[1])); if(vMax<=need) continue;
+        const ts=off.map(o=>o[0]), tSpread=Math.max(...ts)-Math.min(...ts);
+        if(tSpread>=Math.max(3, 0.4*vMax)) barb=true;
+      }
     }
-    if(!barb && len<minLenPx) continue;        // short and no arrowhead: not a grain line
-    const score=len+(barb?1e6:0);
-    if(!best || score>best.score){
-      best={len, score, x1:e1x, y1:e1y, x2:e2x, y2:e2y};
+    if(!barb && len<minLenPx) return null;        // short and no arrowhead: not a grain line
+    return {len, score:len+(barb?1e6:0), x1:e1x, y1:e1y, x2:e2x, y2:e2y};
+  };
+  // straight runs inside a component that is not itself a line (an arrow
+  // touching a placement box or seam line): Hough peaks, then the longest
+  // near-contiguous run of pixels along each peak line, judged like a line
+  const houghLines=(px)=>{
+    const out=[]; if(px.length<200) return out;
+    let mx=0,my=0; for(const [x,y] of px){mx+=x;my+=y;} mx/=px.length; my/=px.length;
+    const NT=90, diag=Math.ceil(Math.hypot(bw,bh)), NR=2*diag+1;
+    const acc=new Int32Array(NT*NR), cs=[], sn=[];
+    for(let k=0;k<NT;k++){ const a=k*Math.PI/NT; cs.push(Math.cos(a)); sn.push(Math.sin(a)); }
+    for(const [x,y] of px){ const dx=x-mx, dy=y-my;
+      for(let k=0;k<NT;k++){ const r=Math.round(dx*cs[k]+dy*sn[k])+diag; acc[k*NR+r]++; } }
+    for(let pk=0;pk<6;pk++){
+      let bi=-1,bv=minArrowPx*0.8;
+      for(let i=0;i<acc.length;i++) if(acc[i]>bv){bv=acc[i];bi=i;}
+      if(bi<0) break;
+      const k=Math.floor(bi/NR), r=bi-k*NR-diag;
+      for(let dk=-3;dk<=3;dk++)for(let dr=-4;dr<=4;dr++){ const kk=(k+dk+NT)%NT, rr=r+dr+diag; if(rr>=0&&rr<NR) acc[kk*NR+rr]=0; }   // suppress
+      let nx=cs[k], ny=sn[k], tx=-ny, ty=nx, rr0=r;             // line normal / direction / offset
+      let on=[];
+      // the Hough grid is coarse (2°, 1 px): refit the line to its own pixels
+      // twice so the ends of a long edge are not lost
+      for(let it=0;it<3;it++){
+        on=[]; for(const [x,y] of px){ const d=(x-mx)*nx+(y-my)*ny-rr0; if(Math.abs(d)<=(it?2:1.5)) on.push([(x-mx)*tx+(y-my)*ty, x, y]); }
+        if(on.length<minArrowPx*0.8) break;
+        let cx=0,cy=0; for(const o of on){cx+=o[1];cy+=o[2];} cx/=on.length; cy/=on.length;
+        let a=0,b=0,c2=0; for(const o of on){const dx=o[1]-cx,dy=o[2]-cy; a+=dx*dx; b+=dx*dy; c2+=dy*dy;}
+        const th=0.5*Math.atan2(2*b,a-c2); tx=Math.cos(th); ty=Math.sin(th); nx=-ty; ny=tx;
+        rr0=(cx-mx)*nx+(cy-my)*ny;
+      }
+      if(on.length<minArrowPx*0.8) continue;
+      const rEff=rr0;
+      on.sort((a,b)=>a[0]-b[0]);
+      let s0=0, best=[0,0];
+      for(let i=1;i<=on.length;i++){ if(i===on.length || on[i][0]-on[i-1][0]>4){ if(on[i-1][0]-on[s0][0] > on[best[1]][0]-on[best[0]][0]) best=[s0,i-1]; s0=i; } }
+      const ta=on[best[0]][0]-2, tb=on[best[1]][0]+2;
+      if(tb-ta<minArrowPx) continue;
+      // the run plus anything within 5 px of it (barbs) inside its extent
+      const seg=[]; for(const [x,y] of px){ const t=(x-mx)*tx+(y-my)*ty, d=Math.abs((x-mx)*nx+(y-my)*ny-rEff); if(t>=ta&&t<=tb&&d<=5) seg.push([x,y]); }
+      out.push(seg);
     }
+    return out;
+  };
+  // connected components of interior ink; each is judged as a line, and
+  // components that are not lines are searched for straight runs
+  const seen=new Uint8Array(n), q=new Int32Array(n);
+  let best=null;
+  const consider=r=>{ if(r && !r.reject && (!best || r.score>best.score)) best=r; };
+  for(let s=0;s<n;s++){
+    if(!ink[s]||seen[s]) continue;
+    let head=0, tail=0; q[tail++]=s; seen[s]=1; const px=[];
+    while(head<tail){
+      const i=q[head++], x=i%bw, y=(i-x)/bw;
+      px.push([x,y]);
+      const t=j=>{ if(ink[j]&&!seen[j]){seen[j]=1;q[tail++]=j;} };
+      if(x>0)t(i-1); if(x<bw-1)t(i+1); if(y>0)t(i-bw); if(y<bh-1)t(i+bw);
+    }
+    const r=evalLine(px);
+    if(r && r.reject==='aspect'){ for(const seg of houghLines(px)) consider(evalLine(seg)); }
+    else consider(r);
   }
   if(!best) return null;
   let ang=Math.atan2(best.y2-best.y1, best.x2-best.x1)*180/Math.PI;
