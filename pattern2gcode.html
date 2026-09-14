@@ -922,9 +922,7 @@ function selectPiece(p, opts={}){
   bar.hidden=false;
   $('edName').textContent=p.name;
   $('edDim').textContent=fmt(p.bb.w,0)+' × '+fmt(p.bb.h,0)+' mm · '+p.poly.length+' pts';
-  $('edGrain').innerHTML = !p.grain ? '<span class="flags bad">no grain found</span>'
-    : '<span class="flags"'+(Math.abs(norm90(90-p.grain.angle))<1?' style="background:var(--ok)"':'')+'>grain '
-      +fmt(p.grain.angle,0)+'°'+(p.grain.manual?' (manual)':'')+'</span>';
+  $('edGrain').innerHTML = grainChip(p);
   $('edKeep').textContent = p.on ? 'Drop' : 'Keep';
   $('edKeep').className = p.on ? 'warn' : '';
   $('edReset').disabled = p.poly.length===p.poly0.length && p.poly.every((q,i)=>q[0]===p.poly0[i][0]&&q[1]===p.poly0[i][1]);
@@ -957,7 +955,7 @@ $('edReset').onclick=()=>{ const p=S.sel; if(!p) return;
 $('edDone').onclick=()=>selectPiece(null);
 function renamePiece(p){
   const v=prompt('Piece name (used for file names):', p.name);
-  if(v){ p.name=v.trim().replace(/[^\w\- ]+/g,'').replace(/\s+/g,'-')||p.name; p.nameUnsure=false;
+  if(v){ p.name=v.trim().replace(/[^\w\- ]+/g,'').replace(/\s+/g,'-')||p.name; p.nameUnsure=false; p.nameMissing=false;
          if(S.sel===p) selectPiece(p,{frame:false}); else { refreshPieceUI(); draw(); } }
 }
 async function startGrainPick(p){
@@ -1085,6 +1083,15 @@ function exportPoly(p){
   if(fit.rot) pts=pts.map(([x,y])=>[a.h-y, x]);     // rotate 90° cw — breaks grain
   return pts;
 }
+/* grain chip: green = set by hand, blue = detected (same colours as the canvas arrows) */
+function grainChip(p){
+  if(!p.grain) return '<span class="flags bad">no grain found</span>';
+  const d=norm90(90-p.grain.angle);
+  const what = Math.abs(d)<1 ? 'vertical' : fmt(Math.abs(d),0)+'° → rotates';
+  return p.grain.manual
+    ? '<span class="flags" style="background:var(--ok)" title="Set by hand">grain '+what+' · manual</span>'
+    : '<span class="flags" title="Detected automatically">grain '+what+'</span>';
+}
 function refreshPieceUI(){
   const list=$('pieceList'); list.innerHTML='';
   $('pieceCount').textContent = S.pieces.length
@@ -1099,7 +1106,7 @@ function refreshPieceUI(){
   const group=p=>{
     if(!p.on) return 2;
     const fit=fitInfo(p);
-    return (!p.grain || !fit.ok || fit.rot || p.nameUnsure) ? 0 : 1;
+    return (!p.grain || !fit.ok || fit.rot || p.nameUnsure || p.nameMissing) ? 0 : 1;
   };
   const ordered=S.pieces.map((p,i)=>({p,i,g:group(p)}))
     .sort((a,b)=>(a.g-b.g)||(a.i-b.i));
@@ -1120,11 +1127,7 @@ function refreshPieceUI(){
     card.style.cursor='pointer';
     const fit=fitInfo(p);
     const d = p.grain ? norm90(90-p.grain.angle) : null;
-    const grainTxt = !p.grain
-      ? '<span class="flags bad">no grain found</span>'
-      : (Math.abs(d)<1
-          ? '<span class="flags" style="background:var(--ok)">grain vertical'+(p.grain.manual?' (manual)':'')+'</span>'
-          : '<span class="flags">grain '+fmt(Math.abs(d),0)+'° → rotates'+(p.grain.manual?' (manual)':'')+'</span>');
+    const grainTxt = grainChip(p);
     card.innerHTML =
       '<span class="nm" title="Page '+p.page+' — tap to rename"></span>'+
       '<span class="dim">'+fmt(fit.w,0)+'×'+fmt(fit.h,0)+'</span>'+
@@ -1133,6 +1136,7 @@ function refreshPieceUI(){
       '<button class="bk">'+(p.on?'Drop':'Keep')+'</button>'+
       '<span class="brk"></span>'+
       (p.nameUnsure?'<span class="flags bad" title="OCR was not confident — tap the name to check it">name unsure</span>':'')+
+      (p.nameMissing?'<span class="flags bad" title="No label could be read — tap the name to set it">no name found</span>':'')+
       grainTxt+
       (fit.ok ? (fit.rot?'<span class="flags bad">rot 90° — grain broken</span>':'')
               : '<span class="flags bad">too big — skipped</span>');
@@ -1493,13 +1497,13 @@ $('btnOCR').addEventListener('click', async ()=>{
           if(r && r.conf>=35 && (!best || r.conf>best.conf)) best=r;
         }
         if(best){
-          p.label=best.text; p.nameUnsure=best.conf<60; named++;
+          p.label=best.text; p.nameUnsure=best.conf<60; p.nameMissing=false; named++;
           if(DEFAULT_NAME.test(p.name)){
             let nm=best.text, k2=2;
             while(S.pieces.some(o=>o!==p && o.name===nm)) nm=best.text+'-'+(k2++);
             p.name=nm;
           }
-        }else unread.push(p.name);
+        }else{ unread.push(p.name); if(DEFAULT_NAME.test(p.name)) p.nameMissing=true; }
         await new Promise(r=>setTimeout(r,0));
       }
       canvas.width=canvas.height=0;                          // free the big bitmap
@@ -1518,7 +1522,7 @@ $('btnOCR').addEventListener('click', async ()=>{
     refreshPieceUI(); draw(); if(S.sel) selectPiece(S.sel,{frame:false});
     setStatus('Read names for '+named+' of '+targets.length+' pieces in '+fmt((performance.now()-t0)/1000,0)+' s'
       +(unsure?', '+unsure+' marked "name unsure"':'')
-      +(unread.length?' — no label found in: '+unread.slice(0,6).join(', ')+(unread.length>6?'…':''):'')+'.');
+      +(unread.length?', '+unread.length+' with no name found — see "Needs attention"':'')+'.');
   }catch(err){ setStatus('Name reading failed: '+err.message); }
   btn.disabled=!S.pieces.length;
 });
@@ -1546,7 +1550,7 @@ function serializeProject(){
     format:PROJECT_FORMAT, version:PROJECT_VERSION, savedAt:new Date().toISOString(),
     pdf:S.pdfInfo, pagesIncluded:[...S.pageInc].sort((a,b)=>a-b), viewPage:S.pageNum, settings,
     pieces:S.pieces.map(p=>({
-      page:p.page, name:p.name, on:p.on, label:p.label||null, nameUnsure:!!p.nameUnsure,
+      page:p.page, name:p.name, on:p.on, label:p.label||null, nameUnsure:!!p.nameUnsure, nameMissing:!!p.nameMissing,
       poly:p.poly.map(([x,y])=>[r2(x),r2(y)]),
       poly0:p.poly0.map(([x,y])=>[r2(x),r2(y)]),
       grain:p.grain ? {x1:r2(p.grain.x1),y1:r2(p.grain.y1),x2:r2(p.grain.x2),y2:r2(p.grain.y2),
@@ -1565,7 +1569,7 @@ function applyProject(proj, source){
   S.pageInc=new Set(proj.pagesIncluded.filter(n=>n>=1&&n<=S.pdf.numPages));
   [...$('pageToggles').querySelectorAll('input')].forEach((cb,i)=>{ cb.checked=S.pageInc.has(i+1); });
   S.pieces=proj.pieces.map((q,i)=>({
-    id:i+1, page:q.page, name:q.name, on:q.on!==false, label:q.label||null, nameUnsure:!!q.nameUnsure,
+    id:i+1, page:q.page, name:q.name, on:q.on!==false, label:q.label||null, nameUnsure:!!q.nameUnsure, nameMissing:!!q.nameMissing,
     poly:q.poly.map(v=>v.slice()), poly0:(q.poly0||q.poly).map(v=>v.slice()), grain:q.grain||null,
   }));
   S.pieces.forEach(recalcBB);
