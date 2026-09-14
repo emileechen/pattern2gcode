@@ -1027,7 +1027,7 @@ function bedLayout(){
   const kept=S.pieces.filter(p=>p.on);
   const bedX=+$('bedX').value, bedY=+$('bedY').value;
   let sheets;
-  if($('pack').checked) sheets=packSheets(kept, bedX, bedY, +$('gap').value+L0());
+  if($('pack').checked) sheets=packSheets(kept, bedX, bedY, +$('gap').value);
   else sheets=kept.filter(p=>fitInfo(p).ok).map(p=>{ const f=fitInfo(p);
     return {items:[{p, x:(bedX-f.w)/2, y:(bedY-f.h)/2, rot:f.rot}]}; });
   const skipped=kept.filter(p=>!fitInfo(p).ok);
@@ -1050,8 +1050,10 @@ function drawBeds(){
     const ox=BED_GAP_MM+(i%L.cols)*L.cellW, oy=BED_GAP_MM+Math.floor(i/L.cols)*L.cellH+BED_LABEL_MM;
     // label
     ctx.font='700 '+fontPx+'px system-ui'; ctx.fillStyle='#26221C'; ctx.textBaseline='bottom';
-    ctx.fillText('Bed '+(i+1)+' — '+sh.items.length+' piece'+(sh.items.length===1?'':'s')
-      +' · '+L.bedX+'×'+L.bedY+' mm', ox*k, (oy-2)*k);
+    { const full='Bed '+(i+1)+' — '+sh.items.length+' piece'+(sh.items.length===1?'':'s')+' · '+L.bedX+'×'+L.bedY+' mm';
+      const short='Bed '+(i+1)+' · '+sh.items.length;
+      const label = ctx.measureText(full).width<=L.bedX*k ? full : (ctx.measureText(short).width<=L.bedX*k ? short : String(i+1));
+      ctx.fillText(label, ox*k, (oy-2)*k); }
     // bed with 5 mm margin guide
     ctx.fillStyle='#fff'; ctx.fillRect(ox*k, oy*k, L.bedX*k, L.bedY*k);
     ctx.strokeStyle='#26221C'; ctx.lineWidth=1.5; ctx.strokeRect(ox*k, oy*k, L.bedX*k, L.bedY*k);
@@ -1612,57 +1614,93 @@ $('bedPreset').addEventListener('change', e=>{
 ['bedX','bedY'].forEach(id=>$(id).addEventListener('input',()=>{ $('bedPreset').value='custom'; }));
 
 /* ---------------- packing (translation only — grain preserved) ---------------- */
+/* ---------------- packing: shape-aware, on a 1 mm occupancy grid ----------------
+   Pieces are placed largest-first at the first free position scanning
+   top-to-bottom, left-to-right. A position is free when the piece's outline
+   stays `gap` clear of every placed outline, and neither piece's sew-line
+   extensions cross the other. Translation only — grain is preserved. */
+let packCache={key:null, sheets:null};
 function packSheets(pieces, bedX, bedY, gap, margin=5){
-  // shelf packing of bounding boxes, tallest first; layout space is y-down
-  const usableW = bedX-2*margin, usableH = bedY-2*margin;
-  const sorted = [...pieces].map(p=>({p, fit:fitInfo(p)}))
-    .sort((a,b)=> b.fit.h - a.fit.h);
+  const key=JSON.stringify([bedX,bedY,gap,margin,ticksOn(),+$('tickOut').value,+$('tickIn').value,$('alignGrain').checked,$('autoRot').checked,
+    pieces.map(p=>[p.name,p.poly.length,+p.bb.w.toFixed(2),+p.bb.h.toFixed(2),p.grain?+p.grain.angle.toFixed(2):null,(p.ticks||[]).length])]);
+  if(packCache.key===key) return packCache.sheets.map(sh=>({items:sh.items.map(it=>({...it}))}));
+  const W=Math.ceil(bedX)+1, H=Math.ceil(bedY)+1;
+  const STEP=2, R=Math.max(0,Math.round(gap));
+  const sorted=[...pieces].map(p=>({p, fit:fitInfo(p)})).filter(x=>x.fit.ok)
+    .sort((a,b)=> b.fit.w*b.fit.h - a.fit.w*a.fit.h);
+  // geometry of a piece in its export frame, sampled to 1 mm cells
+  const geom=x=>{
+    const pts=exportPoly(x.p), segs=exportTicks(x.p);
+    const edge=[];                                            // outline cells (sampled every ~0.7 mm)
+    for(let i=0;i<pts.length;i++){
+      const [ax,ay]=pts[i],[bx,by]=pts[(i+1)%pts.length]; const L=Math.hypot(bx-ax,by-ay), n=Math.max(1,Math.ceil(L/0.7));
+      for(let k=0;k<n;k++){ const t=k/n; edge.push([Math.round(ax+(bx-ax)*t), Math.round(ay+(by-ay)*t)]); }
+    }
+    const ext=[];                                             // extension cells
+    for(const [[ax,ay],[bx,by]] of segs){ const L=Math.hypot(bx-ax,by-ay), n=Math.max(1,Math.ceil(L/0.7));
+      for(let k=0;k<=n;k++){ const t=k/n; ext.push([Math.round(ax+(bx-ax)*t), Math.round(ay+(by-ay)*t)]); } }
+    // interior sample rows for the containment test (a few scanlines)
+    const inside=[];
+    for(let f=0.15;f<0.9;f+=0.25){ const y=x.fit.h*f; const xs=[];
+      for(let i=0,j=pts.length-1;i<pts.length;j=i++){ const [xi,yi]=pts[i],[xj,yj]=pts[j]; if((yi>y)!==(yj>y)) xs.push((xj-xi)*(y-yi)/(yj-yi)+xi); }
+      xs.sort((a,b)=>a-b); for(let k=0;k+1<xs.length;k+=2) for(let cx=xs[k]+1;cx<xs[k+1];cx+=6) inside.push([Math.round(cx),Math.round(y)]); }
+    // extent including extensions (extensions may poke past the outline bbox)
+    let minX=0,minY=0,maxX=x.fit.w,maxY=x.fit.h;
+    for(const [cx,cy] of ext){ minX=Math.min(minX,cx); minY=Math.min(minY,cy); maxX=Math.max(maxX,cx); maxY=Math.max(maxY,cy); }
+    return {pts, segs, edge, ext, inside, minX, minY, maxX, maxY};
+  };
   const sheets=[];
-  for(const {p, fit} of sorted){
-    if(!fit.ok) continue;
-    const w=fit.w, h=fit.h;
+  const newSheet=()=>({items:[], soft:new Uint8Array(W*H), hard:new Uint8Array(W*H)});
+  const blocked=(occ,cells,ox,oy)=>{ ox=Math.round(ox); oy=Math.round(oy); for(const [cx,cy] of cells){ const X=cx+ox, Y=cy+oy; if(X<0||Y<0||X>=W||Y>=H||occ[Y*W+X]) return true; } return false; };
+  const stamp=(occ,cells,ox,oy,r)=>{ ox=Math.round(ox); oy=Math.round(oy); for(const [cx,cy] of cells){ for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){ if(dx*dx+dy*dy>r*r+r) continue;
+      const X=cx+ox+dx, Y=cy+oy+dy; if(X>=0&&Y>=0&&X<W&&Y<H) occ[Y*W+X]=1; } } };
+  const fillInterior=(occ,pts,ox,oy)=>{                      // scanline fill of the placed polygon
+    const ys=pts.map(q=>q[1]); const y0=Math.floor(Math.min(...ys)), y1=Math.ceil(Math.max(...ys));
+    for(let y=y0;y<=y1;y++){ const xs=[];
+      for(let i=0,j=pts.length-1;i<pts.length;j=i++){ const [xi,yi]=pts[i],[xj,yj]=pts[j]; if((yi>y)!==(yj>y)) xs.push((xj-xi)*(y-yi)/(yj-yi)+xi); }
+      xs.sort((a,b)=>a-b);
+      for(let k=0;k+1<xs.length;k+=2){ const Y=y+oy; if(Y<0||Y>=H) continue;
+        for(let X=Math.max(0,Math.ceil(xs[k]+ox)); X<=Math.min(W-1,Math.floor(xs[k+1]+ox)); X++) occ[Y*W+X]=1; } }
+  };
+  for(const x of sorted){
+    const g=geom(x);
+    const w=x.fit.w, h=x.fit.h;
     let placed=false;
-    for(const s of sheets){
-      for(const shelf of s.shelves){
-        if(shelf.x + w <= usableW && shelf.y + h <= usableH){
-          s.items.push({p, x:margin+shelf.x, y:margin+shelf.y, rot:fit.rot});
-          shelf.x += w+gap;
-          shelf.h = Math.max(shelf.h, h);
+    for(const sh of sheets){
+      // scan positions: the outline must keep inside the margin; extensions may reach the bed edge
+      for(let oy=Math.ceil(margin-g.minY*0); oy+h<=bedY-margin && !placed; oy+=STEP){
+        for(let ox=margin; ox+w<=bedX-margin; ox+=STEP){
+          if(blocked(sh.soft,g.edge,ox,oy)) continue;
+          if(blocked(sh.soft,g.inside,ox,oy)) continue;
+          if(blocked(sh.hard,g.ext,ox,oy)) continue;
+          sh.items.push({p:x.p, x:ox, y:oy, rot:x.fit.rot});
+          fillInterior(sh.soft,g.pts,ox,oy); stamp(sh.soft,g.edge,ox,oy,R); stamp(sh.soft,g.ext,ox,oy,1);
+          fillInterior(sh.hard,g.pts,ox,oy); stamp(sh.hard,g.edge,ox,oy,1); stamp(sh.hard,g.ext,ox,oy,1);
           placed=true; break;
         }
       }
       if(placed) break;
-      // try opening a new shelf on this sheet
-      const last=s.shelves[s.shelves.length-1];
-      const ny=last.y+last.h+gap;
-      if(ny+h<=usableH && w<=usableW){
-        s.shelves.push({x:w+gap, y:ny, h});
-        s.items.push({p, x:margin, y:margin+ny, rot:fit.rot});
-        placed=true; break;
-      }
     }
     if(!placed){
-      if(w<=usableW && h<=usableH){
-        sheets.push({shelves:[{x:w+gap, y:0, h}], items:[{p, x:margin, y:margin, rot:fit.rot}]});
-      }else{
-        // fits the bed but not inside the margins: own sheet, centred
-        sheets.push({shelves:[{x:usableW, y:0, h:usableH}],
-                     items:[{p, x:(bedX-w)/2, y:(bedY-h)/2, rot:fit.rot}]});
-      }
+      const sh=newSheet(); sheets.push(sh);
+      const ox = Math.round(w<=bedX-2*margin ? margin : (bedX-w)/2), oy = Math.round(h<=bedY-2*margin ? margin : (bedY-h)/2);   // integer: the grid ignores fractional cells
+      sh.items.push({p:x.p, x:ox, y:oy, rot:x.fit.rot});
+      fillInterior(sh.soft,g.pts,ox,oy); stamp(sh.soft,g.edge,ox,oy,R); stamp(sh.soft,g.ext,ox,oy,1);
+      fillInterior(sh.hard,g.pts,ox,oy); stamp(sh.hard,g.edge,ox,oy,1); stamp(sh.hard,g.ext,ox,oy,1);
     }
   }
   // centre each bed's group on the bed — kinder to fabric taped at the edges
-  for(const s of sheets){
+  const out=sheets.map(sh=>{
     let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
-    for(const it of s.items){
-      const f=fitInfo(it.p);
-      minX=Math.min(minX,it.x); minY=Math.min(minY,it.y);
-      maxX=Math.max(maxX,it.x+f.w); maxY=Math.max(maxY,it.y+f.h);
+    for(const it of sh.items){
+      for(const [px,py] of placedPoly(it)){ minX=Math.min(minX,px); minY=Math.min(minY,py); maxX=Math.max(maxX,px); maxY=Math.max(maxY,py); }
+      for(const seg of placedTicks(it)) for(const [px,py] of seg){ minX=Math.min(minX,px); minY=Math.min(minY,py); maxX=Math.max(maxX,px); maxY=Math.max(maxY,py); }
     }
     const dx=(bedX-(maxX-minX))/2-minX, dy=(bedY-(maxY-minY))/2-minY;
-    for(const it of s.items){ it.x+=dx; it.y+=dy; }
-  }
-  return sheets;
+    return {items:sh.items.map(it=>({p:it.p, x:it.x+dx, y:it.y+dy, rot:it.rot}))};
+  });
+  packCache={key, sheets:out};
+  return out.map(sh=>({items:sh.items.map(it=>({...it}))}));
 }
 function placedTicks(item){
   return exportTicks(item.p).map(seg=>seg.map(([x,y])=>[x+item.x, y+item.y]));
@@ -1678,7 +1716,7 @@ $('btnSVG').addEventListener('click', ()=>{
   let i=0;
   if($('pack').checked){
     const bedX=+$('bedX').value, bedY=+$('bedY').value;
-    const sheets=packSheets(kept, bedX, bedY, +$('gap').value+L0());
+    const sheets=packSheets(kept, bedX, bedY, +$('gap').value);
     for(let s=0;s<sheets.length;s++){
       let body='  <rect x="0" y="0" width="'+bedX+'" height="'+bedY
         +'" fill="none" stroke="#999" stroke-width="0.3" stroke-dasharray="3 3"/>\n';
@@ -1720,7 +1758,7 @@ $('btnGcode').addEventListener('click', ()=>{
   const skipped=kept.filter(p=>!fitInfo(p).ok).length;
   let i=0;
   if($('pack').checked){
-    const sheets=packSheets(kept, +$('bedX').value, +$('bedY').value, +$('gap').value+L0());
+    const sheets=packSheets(kept, +$('bedX').value, +$('bedY').value, +$('gap').value);
     for(let s=0;s<sheets.length;s++){
       const g=makeSheetGcode(sheets[s], s+1, sheets.length);
       setTimeout(()=>download('sheet-'+(s+1)+'.gcode', g, 'text/plain'), i++*350);
