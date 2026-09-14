@@ -39,12 +39,13 @@
     border-bottom:1px solid var(--seam); background:var(--paper); flex-wrap:wrap}
   #canvasBar .hint{font-size:13px; color:#6d675d; margin-left:auto}
   #pageNav{display:flex; align-items:center; gap:6px}
-  #pageNav button{
+  #pageNav button, #canvasBar button.bar{
     border:1.5px solid var(--ink); background:#fff; border-radius:6px; padding:3px 10px;
     font:inherit; font-size:14px; font-weight:700; cursor:pointer; line-height:1.2;
   }
-  #pageNav button:hover:not(:disabled){background:var(--ink); color:var(--paper)}
-  #pageNav button:disabled{opacity:.3; cursor:default}
+  #pageNav button:hover:not(:disabled), #canvasBar button.bar:hover:not(:disabled){background:var(--ink); color:var(--paper)}
+  #pageNav button:disabled, #canvasBar button.bar:disabled{opacity:.3; cursor:default}
+  #canvasBar button.bar{font-weight:600; font-size:13px}
   #pageNav .lbl{font:13px var(--mono); min-width:64px; text-align:center}
 
   section{margin:0 0 22px}
@@ -128,6 +129,7 @@
     </div>
     <span style="font-size:13.5px;margin-left:8px">Zoom</span>
     <input type="range" id="zoom" min="30" max="300" value="100" style="width:140px;accent-color:var(--thread)">
+    <button id="btnFit" class="bar" disabled title="Zoom so the whole page is visible">Fit</button>
     <span class="hint" id="canvasHint">Load a PDF to begin</span>
   </div>
   <div id="canvasWrap"><canvas id="cv" width="900" height="600"></canvas></div>
@@ -259,6 +261,7 @@ $('fileInput').addEventListener('change', async e=>{
     }
     S.pageNum = 1; S.pieces=[]; refreshPieceUI();
     await showPage(1);
+    $('btnFit').disabled=false; fitPage();
     $('btnDetect').disabled = false;
     setStatus('PDF loaded — '+S.pdf.numPages+' pages, all included. Untick pages to omit them, then detect.');
   }catch(err){ setStatus('Could not read that PDF: '+err.message); }
@@ -583,6 +586,19 @@ function alignedPoly(p){
 
 /* ---------------- canvas & refinement ---------------- */
 $('zoom').addEventListener('input', draw);
+/* zoom so the whole page fits inside the canvas area */
+function fitPage(){
+  if(!S.imgCanvas) return;
+  const wrap=$('canvasWrap');
+  const base=Math.min(1, 1100/S.imgCanvas.width);        // same base scale draw() uses
+  const fit=Math.min((wrap.clientWidth-32)/(S.imgCanvas.width*base),
+                     (wrap.clientHeight-32)/(S.imgCanvas.height*base));
+  const z=$('zoom');
+  z.value=Math.max(+z.min, Math.min(+z.max, Math.floor(fit*100)));
+  draw();
+  wrap.scrollLeft=0; wrap.scrollTop=0;
+}
+$('btnFit').addEventListener('click', fitPage);
 function draw(){
   const cv=$('cv'); if(!S.imgCanvas){ return; }
   const z = +$('zoom').value/100 * Math.min(1, 1100/S.imgCanvas.width);
