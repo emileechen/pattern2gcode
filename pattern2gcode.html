@@ -38,7 +38,7 @@
   }
   main{flex:1; min-width:0; display:flex; flex-direction:column}
   #canvasWrap{flex:1; overflow:auto; background:#E4DED2; position:relative}
-  #canvasWrap canvas{display:block; margin:16px auto; background:#fff;
+  #canvasWrap canvas{display:block; position:sticky; top:0; left:0; background:#E4DED2;
     box-shadow:0 2px 14px rgba(38,34,28,.18); cursor:grab; touch-action:none}
   #canvasWrap.panning canvas{cursor:grabbing}
   #canvasWrap.picking canvas{cursor:crosshair}    /* placing grain points */
@@ -167,7 +167,7 @@
       <button id="pgNext" disabled title="Next page (→)">&#9654;</button>
     </div>
     <span style="font-size:13.5px;margin-left:8px">Zoom</span>
-    <input type="range" id="zoom" min="30" max="500" value="100" style="width:140px;accent-color:var(--thread)">
+    <input type="range" id="zoom" min="30" max="1500" value="100" style="width:140px;accent-color:var(--thread)">
     <button id="btnFit" class="bar" disabled title="Zoom so everything is visible">Fit</button>
     <span id="viewSeg" style="display:flex;gap:0;margin-left:8px">
       <button id="viewPage" class="bar on" disabled title="The pattern page">Page</button>
@@ -187,7 +187,7 @@
     <button id="edDone">Done</button>
     <span class="tip">Drag a point to move it · click a hollow midpoint to add one · double-click a point to remove it</span>
   </div>
-  <div id="canvasWrap"><canvas id="cv" width="900" height="600"></canvas></div>
+  <div id="canvasWrap"><canvas id="cv" width="900" height="600"></canvas><div id="spacer"></div></div>
 </main>
 
 <aside>
@@ -304,6 +304,9 @@ const S = {
   sel:null,           // selected piece (edit mode)
   pdfInfo:null,       // {name,size,pages,hash,pageMM} of the loaded PDF
   view:'page',        // 'page' | 'beds'
+  contentW:0, contentH:0, padX:0, padY:0,   // virtual canvas: content px + half-viewport padding
+  hi:null,            // {page, canvas}: 150 dpi render for deep zoom
+  hiPending:false,
   bedHits:[],         // placed polygons in bed view, for click selection
   pendingProject:null,// project loaded before its PDF
 };
@@ -419,6 +422,7 @@ async function showPage(num){
   $('pgNext').disabled = num>=S.pdf.numPages;
   const r = await renderFor(num);
   S.imgCanvas = r.canvas; S.mmPerPx = r.mmPerPx; S.pageMM = r.pageMM;
+  if(S.hi && S.hi.page!==num){ S.hi.canvas.width=0; S.hi=null; }
   $('pageInfo').textContent =
     'Page is '+fmt(S.pageMM.w,0)+' × '+fmt(S.pageMM.h,0)+' mm — scale is exact ('
     +fmt(S.mmPerPx,3)+' mm/px).';
@@ -519,7 +523,9 @@ function detectPieces(imgData, mmPerPx, thr, minPieceMM, gapMM){
     bb.w=bb.maxX-bb.minX; bb.h=bb.maxY-bb.minY;
     const grain = findGrain(lbl, dark, w, h, id, minx, miny, maxx, maxy, mmPerPx, poly);
     const ticks = findJunctions(lbl, dark, w, h, id, minx, miny, maxx, maxy, mmPerPx, poly);
-    pieces.push({id, name:'piece-'+pieces.length, poly, poly0:poly.map(q=>q.slice()), bb, grain, ticks, on:true});
+    anchorTicksToVertices(poly, ticks);
+    pieces.push({id, name:'piece-'+pieces.length, poly, poly0:poly.map(q=>q.slice()), bb, grain,
+                 ticks, ticks0:ticks.map(t=>({...t})), on:true});
   }
   // stable reading order: top-to-bottom, left-to-right
   pieces.sort((a,b)=> (a.bb.minY-b.bb.minY) || (a.bb.minX-b.bb.minX));
@@ -715,7 +721,7 @@ function nearestOnPoly(x, y, poly){
     const vx=bx-ax, vy=by-ay, L2=vx*vx+vy*vy||1e-9;
     let t=((x-ax)*vx+(y-ay)*vy)/L2; t=Math.max(0,Math.min(1,t));
     const px=ax+t*vx, py=ay+t*vy, d=(x-px)**2+(y-py)**2;
-    if(d<bd){ bd=d; const L=Math.sqrt(L2); best={x:px, y:py, nx:vy/L, ny:-vx/L, d:Math.sqrt(d)}; }
+    if(d<bd){ bd=d; const L=Math.sqrt(L2); best={x:px, y:py, nx:vy/L, ny:-vx/L, d:Math.sqrt(d), i, t}; }
   }
   if(best && pointInPoly(best.x+best.nx*1.5, best.y+best.ny*1.5, poly)){ best.nx=-best.nx; best.ny=-best.ny; }
   return best;
@@ -798,11 +804,35 @@ function findJunctions(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, pol
     if(!t || t.d>4) continue;
     const dx=c.dx, dy=c.dy;
     if(dx*t.nx+dy*t.ny<0.15) continue;                    // runs along or into the edge: nothing to extend
-    if(ticks.some(o=>Math.hypot(o.x-t.x,o.y-t.y)<3 && o.dx*dx+o.dy*dy>0.9)) continue;   // same line twice
-    ticks.push({x:t.x, y:t.y, dx, dy});
+    const near=ticks.find(o=>Math.hypot(o.x-t.x,o.y-t.y)<3);
+    if(near && near.dx*dx+near.dy*dy>0.9) continue;       // same line twice
+    // a second line at the same corner shares the corner's anchor point
+    ticks.push({x:near?near.x:t.x, y:near?near.y:t.y, dx, dy});
     if(ticks.length>=60) break;
   }
   return ticks;
+}
+/* make sure the outline has a vertex exactly where each internal line meets
+   it, and remember that vertex for the extension — so editing the corner
+   moves the extension with it */
+function anchorTicksToVertices(poly, ticks){
+  for(const t of ticks){
+    let vi=-1, vd=0.6;                                   // reuse a vertex within 0.6 mm
+    poly.forEach((v,i)=>{ const d=Math.hypot(v[0]-t.x,v[1]-t.y); if(d<vd){ vd=d; vi=i; } });
+    if(vi<0){
+      const n=nearestOnPoly(t.x,t.y,poly); if(!n) continue;
+      poly.splice(n.i,0,[n.x,n.y]); vi=n.i;
+      for(const o of ticks) if(o!==t && o.vi!==undefined && o.vi>=n.i) o.vi++;
+    }
+    t.vi=vi; t.x=poly[vi][0]; t.y=poly[vi][1];
+  }
+}
+/* keep tick→vertex links valid when the outline is edited */
+function ticksAfterInsert(p, at){ for(const t of p.ticks||[]) if(t.vi!==undefined && t.vi>=at) t.vi++; }
+function ticksAfterRemove(p, at){
+  if(!p.ticks) return;
+  p.ticks=p.ticks.filter(t=>t.vi!==at);
+  for(const t of p.ticks) if(t.vi!==undefined && t.vi>at) t.vi--;
 }
 /* extension as a segment in page mm: along the line, through the cut line.
    The outward part stops short of any polygon in `polys` — the piece's own
@@ -811,15 +841,32 @@ function findJunctions(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, pol
 function tickSegment(p, t, polys){
   const dx=t.dx!==undefined?t.dx:t.nx, dy=t.dy!==undefined?t.dy:t.ny;     // older saves stored a normal
   let out=+$('tickOut').value; const inn=+$('tickIn').value;
+  // anchor: where the line's ray crosses the piece's *current* outline — the
+  // recorded contact was on the outline as detected, but the user may have
+  // moved that corner since
+  let ax=t.x, ay=t.y;
+  if(t.vi!==undefined && p.poly[t.vi]){ ax=p.poly[t.vi][0]; ay=p.poly[t.vi][1]; }
+  else {
+    const step=0.25, reach=30;
+    if(pointInPoly(ax,ay,p.poly)){                        // outline moved outward: walk out to the edge
+      let found=false;
+      for(let s2=step; s2<=reach; s2+=step){ const x=t.x+dx*s2, y=t.y+dy*s2; if(!pointInPoly(x,y,p.poly)){ ax=x; ay=y; found=true; break; } }
+      if(!found) return null;
+    }else{                                                // outline moved inward: walk back to it
+      let found=false, lx=ax, ly=ay;
+      for(let s2=step; s2<=reach; s2+=step){ const x=t.x-dx*s2, y=t.y-dy*s2; if(pointInPoly(x,y,p.poly)){ ax=lx; ay=ly; found=true; break; } lx=x; ly=y; }
+      if(!found) return null;                             // the line no longer reaches the outline
+    }
+  }
   if(polys && polys.length){
     const step=0.5;
     for(let s2=1; s2<=out; s2+=step){
-      const x=t.x+dx*s2, y=t.y+dy*s2;
+      const x=ax+dx*s2, y=ay+dy*s2;
       if(polys.some(q=>pointInPoly(x,y,q))){ out=Math.max(0, s2-step-0.5); break; }
     }
   }
   if(out<1) return null;                                 // nothing outside to show: skip it
-  return [[t.x-dx*inn, t.y-dy*inn], [t.x+dx*out, t.y+dy*out]];
+  return [[ax-dx*inn, ay-dy*inn], [ax+dx*out, ay+dy*out]];
 }
 const ticksOn = () => $('tickOn').checked;
 const L0 = () => ticksOn() ? +$('tickOut').value : 0;   // margin needed around a piece for its extensions
@@ -865,9 +912,9 @@ function exportTicks(p){
 
 /* ---------------- canvas & refinement ---------------- */
 $('zoom').addEventListener('input', ()=>{
-  const cv=$('cv'), [cx,cy]=viewCentre(), w0=cv.width||1, h0=cv.height||1;
+  const [cx,cy]=viewCentre(), w0=S.contentW||1, h0=S.contentH||1;
   draw();
-  centreOn(cx/w0*cv.width, cy/h0*cv.height);        // same fraction of the canvas stays centred
+  centreOn(cx/w0*S.contentW, cy/h0*S.contentH);     // same fraction of the content stays centred
 });
 /* zoom so the whole page fits inside the canvas area */
 /* ---------------- bed layout preview ---------------- */
@@ -891,12 +938,11 @@ function bedLayout(){
   return {sheets, skipped, bedX, bedY, cols, rows, cellW, cellH, wmm, hmm, base, w100:wmm*base, h100:hmm*base};
 }
 function drawBeds(){
-  const cv=$('cv'), L=bedLayout();
+  const L=bedLayout();
   const k=+$('zoom').value/100*L.base;                     // px per mm
   S.zoom=k; S.bedHits=[];
-  cv.width=Math.round(L.wmm*k); cv.height=Math.round(L.hmm*k);
-  const ctx=cv.getContext('2d');
-  ctx.fillStyle='#E4DED2'; ctx.fillRect(0,0,cv.width,cv.height);
+  setContentSize(Math.round(L.wmm*k), Math.round(L.hmm*k));
+  const ctx=beginView();
   const fontPx=Math.max(10, Math.min(16, 4*k));
   L.sheets.forEach((sh,i)=>{
     const ox=BED_GAP_MM+(i%L.cols)*L.cellW, oy=BED_GAP_MM+Math.floor(i/L.cols)*L.cellH+BED_LABEL_MM;
@@ -961,36 +1007,86 @@ function fitPage(){
   const z=$('zoom');
   z.value=Math.max(+z.min, Math.min(+z.max, Math.floor(fit*100)));
   draw();
-  const cv=$('cv'); centreOn(cv.width/2, cv.height/2);
+  centreOn(S.contentW/2, S.contentH/2);
 }
 $('btnFit').addEventListener('click', fitPage);
-/* half a viewport of padding around the canvas so any point — even a piece on
-   the page edge — can be scrolled to the centre of the view */
-function padCanvas(){
-  const wrap=$('canvasWrap'), cv=$('cv');
-  cv.style.margin=Math.round(wrap.clientHeight/2)+'px '+Math.round(wrap.clientWidth/2)+'px';
+/* The canvas is only ever viewport-sized: it sticks to the top-left of the
+   scroll area while a spacer provides the scroll extent, and draw() shifts
+   its coordinate system by the scroll offset. "Content px" are the page (or
+   bed layout) at the current zoom; half a viewport of padding on every side
+   lets any point be scrolled to the centre. */
+function setContentSize(W, H){
+  const wrap=$('canvasWrap');
+  S.contentW=W; S.contentH=H;
+  S.padX=Math.round(wrap.clientWidth/2); S.padY=Math.round(wrap.clientHeight/2);
+  const sp=$('spacer');
+  sp.style.width=(W+2*S.padX)+'px';
+  sp.style.height=Math.max(0, H+2*S.padY-wrap.clientHeight)+'px';
 }
-/* scroll so that canvas-pixel point (px,py) sits at the centre of the view */
+/* size the canvas to the viewport (device pixels), map content px → screen */
+function beginView(){
+  const wrap=$('canvasWrap'), cv=$('cv'), dpr=window.devicePixelRatio||1;
+  const cw=wrap.clientWidth, ch=wrap.clientHeight;
+  if(cv.width!==Math.round(cw*dpr)||cv.height!==Math.round(ch*dpr)){ cv.width=Math.round(cw*dpr); cv.height=Math.round(ch*dpr); }
+  cv.style.width=cw+'px'; cv.style.height=ch+'px';
+  const ctx=cv.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr, dpr*(S.padX-wrap.scrollLeft), dpr*(S.padY-wrap.scrollTop));
+  ctx.fillStyle='#E4DED2'; ctx.fillRect(wrap.scrollLeft-S.padX, wrap.scrollTop-S.padY, cw, ch);
+  return ctx;
+}
+/* content-px rectangle currently visible */
+function viewRect(){
+  const wrap=$('canvasWrap');
+  return {x:wrap.scrollLeft-S.padX, y:wrap.scrollTop-S.padY, w:wrap.clientWidth, h:wrap.clientHeight};
+}
+/* pointer event → content px */
+function contentXY(e){
+  const wrap=$('canvasWrap'), wr=wrap.getBoundingClientRect();
+  return [e.clientX-wr.left+wrap.scrollLeft-S.padX, e.clientY-wr.top+wrap.scrollTop-S.padY];
+}
+/* scroll so that content point (px,py) sits at the centre of the view */
 function centreOn(px, py){
-  const wrap=$('canvasWrap'), cv=$('cv');
-  wrap.scrollLeft=Math.round(cv.offsetLeft+px-wrap.clientWidth/2);
-  wrap.scrollTop =Math.round(cv.offsetTop +py-wrap.clientHeight/2);
+  const wrap=$('canvasWrap');
+  wrap.scrollLeft=Math.round(S.padX+px-wrap.clientWidth/2);
+  wrap.scrollTop =Math.round(S.padY+py-wrap.clientHeight/2);
+  draw();
 }
-/* canvas-pixel point currently at the centre of the view */
+/* content point currently at the centre of the view */
 function viewCentre(){
-  const wrap=$('canvasWrap'), cv=$('cv');
-  return [wrap.scrollLeft+wrap.clientWidth/2-cv.offsetLeft, wrap.scrollTop+wrap.clientHeight/2-cv.offsetTop];
+  const wrap=$('canvasWrap');
+  return [wrap.scrollLeft+wrap.clientWidth/2-S.padX, wrap.scrollTop+wrap.clientHeight/2-S.padY];
+}
+{ let queued=false;
+  const redraw=()=>{ if(queued) return; queued=true; requestAnimationFrame(()=>{ queued=false; draw(); }); };
+  $('canvasWrap').addEventListener('scroll', redraw);
+  window.addEventListener('resize', ()=>{ if(S.imgCanvas){ setContentSize(S.contentW,S.contentH); redraw(); } });
+}
+/* deep zoom: a 150 dpi render of the current page, fetched lazily */
+function wantHiRes(){
+  if(S.hi && S.hi.page===S.pageNum) return S.hi.canvas;
+  if(!S.hiPending && S.zoom>0.9){
+    S.hiPending=true;
+    renderCanvasAt(S.pageNum, 150).then(r=>{ S.hi={page:S.pageNum, canvas:r.canvas}; S.hiPending=false; draw(); })
+      .catch(()=>{ S.hiPending=false; });
+  }
+  return null;
 }
 function draw(){
-  const cv=$('cv'); if(!S.imgCanvas){ return; }
-  padCanvas();
+  if(!S.imgCanvas){ return; }
   if(S.view==='beds'){ drawBeds(); return; }
   const z = +$('zoom').value/100 * Math.min(1, 1100/S.imgCanvas.width);
   S.zoom=z;
-  cv.width = Math.round(S.imgCanvas.width*z);
-  cv.height= Math.round(S.imgCanvas.height*z);
-  const ctx=cv.getContext('2d');
-  ctx.drawImage(S.imgCanvas,0,0,cv.width,cv.height);
+  const W=Math.round(S.imgCanvas.width*z), H=Math.round(S.imgCanvas.height*z);
+  setContentSize(W,H);
+  const ctx=beginView();
+  // page image: only the visible part, from the sharpest render we have
+  const src = (z>0.9 && wantHiRes()) || S.imgCanvas;
+  const v=viewRect(), sx=src.width/W, sy=src.height/H;
+  const x0=Math.max(0,v.x), y0=Math.max(0,v.y), x1=Math.min(W,v.x+v.w), y1=Math.min(H,v.y+v.h);
+  if(x1>x0 && y1>y0){
+    ctx.fillStyle='#fff'; ctx.fillRect(x0,y0,x1-x0,y1-y0);
+    ctx.drawImage(src, x0*sx, y0*sy, (x1-x0)*sx, (y1-y0)*sy, x0, y0, x1-x0, y1-y0);
+  }
   const pxPerMM = 1/S.mmPerPx*z;
   for(const p of S.pieces.filter(p=>p.page===S.pageNum)){
     ctx.beginPath();
@@ -1059,10 +1155,12 @@ function draw(){
           ctx.beginPath(); ctx.arc((ax+bx)/2*pxPerMM,(ay+by)/2*pxPerMM,R*0.6,0,7);
           ctx.fillStyle='#fff'; ctx.fill(); ctx.strokeStyle='#39536B'; ctx.lineWidth=1; ctx.stroke();
         }
-        for(const [x,y] of p.poly){                  // solid points = drag
-          ctx.beginPath(); ctx.arc(x*pxPerMM,y*pxPerMM,R,0,7);
-          ctx.fillStyle='#39536B'; ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=1.5; ctx.stroke();
-        }
+        const junction=new Set((p.ticks||[]).map(t=>t.vi));
+        p.poly.forEach(([x,y],i)=>{                  // solid points = drag; ringed = a line meets here
+          const J=junction.has(i);
+          ctx.beginPath(); ctx.arc(x*pxPerMM,y*pxPerMM,J?R+1.5:R,0,7);
+          ctx.fillStyle=J?'#B3402F':'#39536B'; ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=1.5; ctx.stroke();
+        });
       }
       ctx.restore();
     }
@@ -1090,8 +1188,8 @@ function handlesVisible(p, pxPerMM){
   return per/p.poly.length*pxPerMM >= HANDLE_R*2;
 }
 function canvasMM(e){
-  const r=$('cv').getBoundingClientRect();
-  return [(e.clientX-r.left)/S.zoom*S.mmPerPx, (e.clientY-r.top)/S.zoom*S.mmPerPx];
+  const [cx,cy]=contentXY(e);
+  return [cx/S.zoom*S.mmPerPx, cy/S.zoom*S.mmPerPx];
 }
 /* which handle of the selected piece is under the pointer? */
 function hitHandle(mmX, mmY){
@@ -1155,7 +1253,7 @@ $('edNext').onclick=()=>reviewNext(S.sel);
 $('edName').onclick=()=>{ if(S.sel) renamePiece(S.sel); };
 $('edGrainBtn').onclick=()=>{ if(S.sel) startGrainPick(S.sel); };
 $('edReset').onclick=()=>{ const p=S.sel; if(!p) return;
-  p.poly=p.poly0.map(q=>q.slice()); recalcBB(p); selectPiece(p,{frame:false});
+  p.poly=p.poly0.map(q=>q.slice()); if(p.ticks0) p.ticks=p.ticks0.map(t=>({...t})); recalcBB(p); selectPiece(p,{frame:false});
   setStatus(p.name+' outline restored to the detected one.'); };
 $('edDone').onclick=()=>selectPiece(null);
 function renamePiece(p){
@@ -1184,7 +1282,7 @@ async function startGrainPick(p){
       let i=hh.i;
       if(hh.kind==='mid'){                            // insert a new point on this edge
         const [ax,ay]=p.poly[i], [bx,by]=p.poly[(i+1)%p.poly.length];
-        p.poly.splice(i+1,0,[(ax+bx)/2,(ay+by)/2]); i=i+1;
+        p.poly.splice(i+1,0,[(ax+bx)/2,(ay+by)/2]); ticksAfterInsert(p,i+1); i=i+1;
       }
       drag={id:e.pointerId, p, i, moved:hh.kind==='mid'};
       cv.setPointerCapture(e.pointerId); return;
@@ -1223,16 +1321,14 @@ async function startGrainPick(p){
     if(!hh || hh.kind!=='pt') return;
     const p=S.sel;
     if(p.poly.length<=3){ setStatus('A piece needs at least 3 points.'); return; }
-    p.poly.splice(hh.i,1); recalcBB(p); selectPiece(p,{frame:false});
+    p.poly.splice(hh.i,1); ticksAfterRemove(p,hh.i); recalcBB(p); selectPiece(p,{frame:false});
   });
 }
 
 $('cv').addEventListener('click', e=>{
   if(S.suppressClick){ S.suppressClick=false; return; }  // end of a drag, not a tap
   if(!S.pieces.length) return;
-  const r=$('cv').getBoundingClientRect();
-  const mmX=(e.clientX-r.left)/S.zoom*S.mmPerPx;
-  const mmY=(e.clientY-r.top)/S.zoom*S.mmPerPx;
+  const [mmX,mmY]=canvasMM(e);
   if(S.grainPick){                            // manual grain: two taps along the arrow
     const gp=S.grainPick;
     if(!gp.pt){ gp.pt=[mmX,mmY]; draw();
@@ -1252,7 +1348,7 @@ $('cv').addEventListener('click', e=>{
   // topmost smallest piece containing the point
   let hit=null;
   if(S.view==='beds'){
-    const bx=(e.clientX-r.left)/S.zoom, by=(e.clientY-r.top)/S.zoom;     // S.zoom is px/mm here
+    const [cx0,cy0]=contentXY(e); const bx=cx0/S.zoom, by=cy0/S.zoom;     // S.zoom is px/mm here
     for(const h of S.bedHits) if(pointInPoly(bx,by,h.pts)){ hit=h.p; break; }
   }else{
     for(const p of S.pieces.filter(p=>p.page===S.pageNum))
@@ -1815,7 +1911,8 @@ function serializeProject(){
       page:p.page, name:p.name, on:p.on, label:p.label||null, nameUnsure:!!p.nameUnsure, nameMissing:!!p.nameMissing,
       poly:p.poly.map(([x,y])=>[r2(x),r2(y)]),
       poly0:p.poly0.map(([x,y])=>[r2(x),r2(y)]),
-      ticks:(p.ticks||[]).map(t=>({x:r2(t.x),y:r2(t.y),dx:+(t.dx??t.nx).toFixed(4),dy:+(t.dy??t.ny).toFixed(4)})),
+      ticks:(p.ticks||[]).map(t=>({x:r2(t.x),y:r2(t.y),dx:+(t.dx??t.nx).toFixed(4),dy:+(t.dy??t.ny).toFixed(4),vi:t.vi})),
+      ticks0:(p.ticks0||[]).map(t=>({x:r2(t.x),y:r2(t.y),dx:+(t.dx??t.nx).toFixed(4),dy:+(t.dy??t.ny).toFixed(4),vi:t.vi})),
       grain:p.grain ? {x1:r2(p.grain.x1),y1:r2(p.grain.y1),x2:r2(p.grain.x2),y2:r2(p.grain.y2),
                        angle:r2(p.grain.angle),len:r2(p.grain.len),manual:!!p.grain.manual,confirmed:!!(p.grain.confirmed||p.grain.manual)} : null,
     })),
@@ -1833,7 +1930,7 @@ function applyProject(proj, source){
   [...$('pageToggles').querySelectorAll('input')].forEach((cb,i)=>{ cb.checked=S.pageInc.has(i+1); });
   S.pieces=proj.pieces.map((q,i)=>({
     id:i+1, page:q.page, name:q.name, on:q.on!==false, label:q.label||null, nameUnsure:!!q.nameUnsure, nameMissing:!!q.nameMissing,
-    poly:q.poly.map(v=>v.slice()), poly0:(q.poly0||q.poly).map(v=>v.slice()), grain:q.grain||null, ticks:q.ticks||[],
+    poly:q.poly.map(v=>v.slice()), poly0:(q.poly0||q.poly).map(v=>v.slice()), grain:q.grain||null, ticks:q.ticks||[], ticks0:q.ticks0||q.ticks||[],
   }));
   S.pieces.forEach(recalcBB);
   selectPiece(null);
