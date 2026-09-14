@@ -184,10 +184,11 @@
     <button id="edGrainBtn">Set grain</button>
     <button id="edNext" title="Jump to the next piece whose grain needs a look (Enter confirms and jumps)">Next to review ›</button>
     <button id="edCorner" title="Toggle the active anchor between a smooth curve point (with tangent handles) and a sharp corner">Corner ⇄ smooth</button>
+    <button id="edAddExt" title="Add a sew-line extension at the active anchor (drag its red handle to set the angle)">Add extension</button>
     <button id="edFewer" title="Remove anchors that don't change the shape by more than 0.6 mm (line junctions are kept)">Fewer points</button>
     <button id="edReset" title="Restore the detected outline">Reset outline</button>
     <button id="edDone">Done</button>
-    <span class="tip">Drag an anchor to move it · click it to show its tangent handles and drag those to shape the curve (⌥ drag breaks the pair) · hollow midpoint adds an anchor · double-click removes one</span>
+    <span class="tip">Drag an anchor to move it · click it to show its handles: green tangents shape the curve (⌥ drag breaks the pair), red diamonds set an extension's angle · hollow midpoint adds an anchor · double-click removes an anchor or extension</span>
   </div>
   <div id="canvasWrap"><canvas id="cv" width="900" height="600"></canvas><div id="spacer"></div></div>
 </main>
@@ -1318,10 +1319,19 @@ function draw(){
           ctx.beginPath(); ctx.arc(m[0]*pxPerMM,m[1]*pxPerMM,R*0.6,0,7);
           ctx.fillStyle='#fff'; ctx.fill(); ctx.strokeStyle='#39536B'; ctx.lineWidth=1; ctx.stroke();
         }
-        // tangent handles of the active anchor
+        // tangent handles of the active anchor, and its extension-direction handles
         const act=S.activeAnchor;
         if(act!==null && act!==undefined && path[act]){
           const a=path[act];
+          for(const t of p.ticks||[]){
+            if(t.ai!==act) continue;
+            const seg=tickSegment(p,t,null); if(!seg) continue;
+            const [ex,ey]=seg[1];
+            ctx.beginPath(); ctx.moveTo(a.x*pxPerMM,a.y*pxPerMM); ctx.lineTo(ex*pxPerMM,ey*pxPerMM);
+            ctx.strokeStyle='#B3402F'; ctx.lineWidth=1; ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]);
+            ctx.beginPath(); ctx.moveTo(ex*pxPerMM, ey*pxPerMM-R); ctx.lineTo(ex*pxPerMM+R, ey*pxPerMM); ctx.lineTo(ex*pxPerMM, ey*pxPerMM+R); ctx.lineTo(ex*pxPerMM-R, ey*pxPerMM); ctx.closePath();
+            ctx.fillStyle='#B3402F'; ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=1.5; ctx.stroke();
+          }
           for(const side of ['in','out']){
             if(!a[side]) continue;
             const hx=(a.x+a[side][0])*pxPerMM, hy=(a.y+a[side][1])*pxPerMM;
@@ -1469,6 +1479,12 @@ function hitHandle(mmX, mmY){
       const d=Math.hypot(a.x+a[side][0]-mmX, a.y+a[side][1]-mmY);
       if(d<tolPt && d<bd){ bd=d; best={kind:side, i:act}; }
     }
+    (p.ticks||[]).forEach((t,ti)=>{                    // extension direction handles
+      if(t.ai!==act) return;
+      const seg=tickSegment(p,t,null); if(!seg) return;
+      const d=Math.hypot(seg[1][0]-mmX, seg[1][1]-mmY);
+      if(d<tolPt && d<bd){ bd=d; best={kind:'tick', i:ti}; }
+    });
     if(best) return best;
   }
   for(let i=0;i<p.path.length;i++){
@@ -1505,6 +1521,7 @@ function selectPiece(p, opts={}){
   $('edKeep').className = p.on ? 'warn' : '';
   $('edReset').disabled = !!p.path0 && JSON.stringify(p.path)===JSON.stringify(p.path0);
   $('edCorner').disabled = S.activeAnchor===null || S.activeAnchor===undefined || !p.path[S.activeAnchor];
+  $('edAddExt').disabled = $('edCorner').disabled;
   refreshPieceUI();
   if(opts.frame!==false && S.view==='page') framePiece(p, opts.zoom!==false);   // selecting zooms to fit the piece
   draw();
@@ -1551,6 +1568,11 @@ $('edFewer').onclick=()=>{ const p=S.sel; if(!p) return; ensurePath(p);
   for(const t of p.ticks||[]) if(map[t.ai]!==undefined) t.ai=map[t.ai];
   p.path=pathFromPoly(pts, corners); S.activeAnchor=null; applyPath(p); selectPiece(p,{frame:false});
   setStatus(p.name+': '+before+' → '+pts.length+' anchors.'); };
+$('edAddExt').onclick=()=>{ const p=S.sel, i=S.activeAnchor; if(!p||i===null||i===undefined||!p.path[i]) return;
+  const a=p.path[i]; const n=nearestOnPoly(a.x,a.y,p.poly)||{nx:0,ny:-1};
+  a.corner=true; a.in=a.out=null; a.auto=false;                   // a junction is a corner
+  p.ticks=p.ticks||[]; p.ticks.push({x:a.x, y:a.y, dx:n.nx, dy:n.ny, ai:i, vi:0, manual:true});
+  applyPath(p); selectPiece(p,{frame:false}); setStatus('Extension added — drag its red handle to set the angle.'); };
 $('edCorner').onclick=()=>{ const p=S.sel, i=S.activeAnchor; if(!p||i===null||i===undefined||!p.path[i]) return;
   const a=p.path[i];
   if(a.corner){ a.corner=false; a.auto=true; autoHandles(p.path, i); }
@@ -1584,7 +1606,7 @@ async function startGrainPick(p){
       if(kind==='mid'){                               // insert an anchor at the curve's midpoint
         i=splitSegment(p.path,i,0.5); ticksAfterInsert(p,i); kind='pt';
       }
-      S.activeAnchor=i;
+      S.activeAnchor = kind==='tick' ? p.ticks[i].ai : i;
       drag={id:e.pointerId, p, i, kind, alt:e.altKey, moved:hh.kind==='mid'};
       cv.setPointerCapture(e.pointerId); draw(); return;
     }
@@ -1599,6 +1621,12 @@ async function startGrainPick(p){
     if(drag && e.pointerId===drag.id){
       const [mmX,mmY]=canvasMM(e);
       const p=drag.p, a=p.path[drag.i];
+      if(drag.kind==='tick'){                       // rotate the extension about its anchor
+        const t=p.ticks[drag.i], an=p.path[t.ai];
+        const dx=mmX-an.x, dy=mmY-an.y, L=Math.hypot(dx,dy);
+        if(L>0.5){ t.dx=dx/L; t.dy=dy/L; t.manual=true; }
+        drag.moved=true; draw(); return;
+      }
       if(drag.kind==='pt'){
         a.x=mmX; a.y=mmY;
         autoHandles(p.path, drag.i);                 // auto neighbours follow; manual handles ride along
@@ -1631,6 +1659,9 @@ async function startGrainPick(p){
   cv.addEventListener('dblclick', e=>{                // remove a point
     const [mmX,mmY]=canvasMM(e);
     const hh=hitHandle(mmX,mmY);
+    if(hh && hh.kind==='tick'){                       // remove this extension
+      const p=S.sel; p.ticks.splice(hh.i,1); selectPiece(p,{frame:false}); return;
+    }
     if(!hh || hh.kind!=='pt') return;
     const p=S.sel; ensurePath(p);
     if(p.path.length<=3){ setStatus('A piece needs at least 3 points.'); return; }
@@ -2261,7 +2292,7 @@ function serializeProject(){
       page:p.page, name:p.name, on:p.on, label:p.label||null, nameUnsure:!!p.nameUnsure, nameMissing:!!p.nameMissing,
       poly:p.path?[]:p.poly.map(([x,y])=>[r2(x),r2(y)]),          // rebuilt from the path on load
       poly0:p.path0?[]:p.poly0.map(([x,y])=>[r2(x),r2(y)]),
-      ticks:(p.ticks||[]).map(t=>({x:r2(t.x),y:r2(t.y),dx:+(t.dx??t.nx).toFixed(4),dy:+(t.dy??t.ny).toFixed(4),vi:t.vi,ai:t.ai})),
+      ticks:(p.ticks||[]).map(t=>({x:r2(t.x),y:r2(t.y),dx:+(t.dx??t.nx).toFixed(4),dy:+(t.dy??t.ny).toFixed(4),vi:t.vi,ai:t.ai,manual:!!t.manual})),
       path:(p.path||[]).map(a=>({x:r2(a.x),y:r2(a.y),in:a.in&&a.in.map(r2),out:a.out&&a.out.map(r2),auto:!!a.auto,corner:!!a.corner})),
       path0:(p.path0||[]).map(a=>({x:r2(a.x),y:r2(a.y),in:a.in&&a.in.map(r2),out:a.out&&a.out.map(r2),auto:!!a.auto,corner:!!a.corner})),
       ticks0:(p.ticks0||[]).map(t=>({x:r2(t.x),y:r2(t.y),dx:+(t.dx??t.nx).toFixed(4),dy:+(t.dy??t.ny).toFixed(4),vi:t.vi,ai:t.ai})),
