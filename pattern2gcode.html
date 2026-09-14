@@ -1106,7 +1106,7 @@ function refreshPieceUI(){
   const group=p=>{
     if(!p.on) return 2;
     const fit=fitInfo(p);
-    return (!p.grain || !fit.ok || fit.rot || p.nameUnsure || p.nameMissing) ? 0 : 1;
+    return (!p.grain || fit.rot || p.nameUnsure || p.nameMissing) ? 0 : 1;   // too big is informational
   };
   const ordered=S.pieces.map((p,i)=>({p,i,g:group(p)}))
     .sort((a,b)=>(a.g-b.g)||(a.i-b.i));
