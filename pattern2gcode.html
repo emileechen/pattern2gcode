@@ -183,10 +183,11 @@
     <button id="edConfirm" hidden>Confirm grain</button>
     <button id="edGrainBtn">Set grain</button>
     <button id="edNext" title="Jump to the next piece whose grain needs a look (Enter confirms and jumps)">Next to review ›</button>
-    <button id="edFewer" title="Remove points that don't change the shape by more than 0.6 mm (line junctions are kept)">Fewer points</button>
+    <button id="edCorner" title="Toggle the active anchor between a smooth curve point (with tangent handles) and a sharp corner">Corner ⇄ smooth</button>
+    <button id="edFewer" title="Remove anchors that don't change the shape by more than 0.6 mm (line junctions are kept)">Fewer points</button>
     <button id="edReset" title="Restore the detected outline">Reset outline</button>
     <button id="edDone">Done</button>
-    <span class="tip">Drag a point to move it · click a hollow midpoint to add one · double-click a point to remove it</span>
+    <span class="tip">Drag an anchor to move it · click it to show its tangent handles and drag those to shape the curve (⌥ drag breaks the pair) · hollow midpoint adds an anchor · double-click removes one</span>
   </div>
   <div id="canvasWrap"><canvas id="cv" width="900" height="600"></canvas><div id="spacer"></div></div>
 </main>
@@ -308,6 +309,7 @@ const S = {
   contentW:0, contentH:0, padX:0, padY:0,   // virtual canvas: content px + half-viewport padding
   hi:null,            // {page, canvas}: 150 dpi render for deep zoom
   hiPending:false,
+  activeAnchor:null,  // index into S.sel.path whose tangent handles are shown
   bedHits:[],         // placed polygons in bed view, for click selection
   pendingProject:null,// project loaded before its PDF
 };
@@ -590,8 +592,13 @@ function detectPieces(imgData, mmPerPx, thr, minPieceMM, gapMM, hi){
       const grain = findGrain(lbl, dark, w, h, pt.pid, pt.minx, pt.miny, pt.maxx, pt.maxy, mmPerPx, poly);
       const ticks = findJunctions(lbl, dark, w, h, pt.pid, pt.minx, pt.miny, pt.maxx, pt.maxy, mmPerPx, poly);
       anchorTicksToVertices(poly, ticks);
-      pieces.push({id:pt.pid, name:'piece-'+pieces.length, poly, poly0:poly.map(q=>q.slice()), bb, grain,
-                   ticks, ticks0:ticks.map(t=>({...t})), on:true});
+      for(const t of ticks) t.ai=t.vi;
+      const path=pathFromPoly(poly, new Set(ticks.map(t=>t.vi)));
+      const piece={id:pt.pid, name:'piece-'+pieces.length, poly, poly0:poly.map(q=>q.slice()), bb, grain,
+                   ticks, ticks0:ticks.map(t=>({...t})), path, path0:clonePath(path), on:true};
+      applyPath(piece);
+      piece.poly0=piece.poly.map(q=>q.slice());
+      pieces.push(piece);
     }
   }
   // stable reading order: top-to-bottom, left-to-right
@@ -774,7 +781,7 @@ function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly){
   }
   // connected components of interior ink; PCA each; keep thin, long ones
   const seen=new Uint8Array(n), q=new Int32Array(n);
-  const minLenPx=25/mmPerPx;                 // grain arrow at least 25 mm
+  const minLenPx=25/mmPerPx, minArrowPx=12/mmPerPx;   // a plain line must be 25 mm; one with an arrowhead only 12 mm
   let best=null;
   for(let s=0;s<n;s++){
     if(!ink[s]||seen[s]) continue;
@@ -800,7 +807,7 @@ function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly){
     let t0=1e9,t1=-1e9;
     for(const [x,y] of px){const t=(x-mx)*ux+(y-my)*uy; if(t<t0)t0=t; if(t>t1)t1=t;}
     let len=t1-t0;
-    if(len<minLenPx) continue;
+    if(len<minArrowPx) continue;
     // arrowheads (often a single barb on one side) pull the fit off-axis:
     // refit on the middle 60% of the line — shaft only — then re-measure ends
     {
@@ -840,6 +847,7 @@ function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly){
       const need=Math.max(2.5*shaft, 1.2/mmPerPx);
       barb = endS[0]>need || endS[1]>need;
     }
+    if(!barb && len<minLenPx) continue;        // short and no arrowhead: not a grain line
     const score=len+(barb?1e6:0);
     if(!best || score>best.score){
       best={len, score, x1:e1x, y1:e1y, x2:e2x, y2:e2y};
@@ -970,11 +978,11 @@ function anchorTicksToVertices(poly, ticks){
   }
 }
 /* keep tick→vertex links valid when the outline is edited */
-function ticksAfterInsert(p, at){ for(const t of p.ticks||[]) if(t.vi!==undefined && t.vi>=at) t.vi++; }
+function ticksAfterInsert(p, at){ for(const t of p.ticks||[]) if(t.ai!==undefined && t.ai>=at) t.ai++; }
 function ticksAfterRemove(p, at){
   if(!p.ticks) return;
-  p.ticks=p.ticks.filter(t=>t.vi!==at);
-  for(const t of p.ticks) if(t.vi!==undefined && t.vi>at) t.vi--;
+  p.ticks=p.ticks.filter(t=>t.ai!==at);
+  for(const t of p.ticks) if(t.ai!==undefined && t.ai>at) t.ai--;
 }
 /* extension as a segment in page mm: along the line, through the cut line.
    The outward part stops short of any polygon in `polys` — the piece's own
@@ -1304,17 +1312,31 @@ function draw(){
       p.poly.forEach(([x,y],i)=> i?ctx.lineTo(x*pxPerMM,y*pxPerMM):ctx.moveTo(x*pxPerMM,y*pxPerMM));
       ctx.closePath(); ctx.strokeStyle='#39536B'; ctx.lineWidth=2; ctx.stroke();
       if(handlesVisible(p, pxPerMM)){
-        const R=HANDLE_R;
-        for(let i=0;i<p.poly.length;i++){          // hollow midpoints = add here
-          const [ax,ay]=p.poly[i], [bx,by]=p.poly[(i+1)%p.poly.length];
-          ctx.beginPath(); ctx.arc((ax+bx)/2*pxPerMM,(ay+by)/2*pxPerMM,R*0.6,0,7);
+        const R=HANDLE_R, path=p.path;
+        for(let i=0;i<path.length;i++){              // hollow midpoints = add an anchor here
+          const sgm=segCtrl(path,i), m=bez(sgm.a,sgm.c1,sgm.c2,sgm.b,0.5);
+          ctx.beginPath(); ctx.arc(m[0]*pxPerMM,m[1]*pxPerMM,R*0.6,0,7);
           ctx.fillStyle='#fff'; ctx.fill(); ctx.strokeStyle='#39536B'; ctx.lineWidth=1; ctx.stroke();
         }
-        const junction=new Set((p.ticks||[]).map(t=>t.vi));
-        p.poly.forEach(([x,y],i)=>{                  // solid points = drag; ringed = a line meets here
-          const J=junction.has(i);
-          ctx.beginPath(); ctx.arc(x*pxPerMM,y*pxPerMM,J?R+1.5:R,0,7);
-          ctx.fillStyle=J?'#B3402F':'#39536B'; ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=1.5; ctx.stroke();
+        // tangent handles of the active anchor
+        const act=S.activeAnchor;
+        if(act!==null && act!==undefined && path[act]){
+          const a=path[act];
+          for(const side of ['in','out']){
+            if(!a[side]) continue;
+            const hx=(a.x+a[side][0])*pxPerMM, hy=(a.y+a[side][1])*pxPerMM;
+            ctx.beginPath(); ctx.moveTo(a.x*pxPerMM,a.y*pxPerMM); ctx.lineTo(hx,hy);
+            ctx.strokeStyle='#3E6B4F'; ctx.lineWidth=1.2; ctx.stroke();
+            ctx.fillStyle='#3E6B4F'; ctx.fillRect(hx-R*0.8, hy-R*0.8, R*1.6, R*1.6);
+            ctx.strokeStyle='#fff'; ctx.lineWidth=1; ctx.strokeRect(hx-R*0.8, hy-R*0.8, R*1.6, R*1.6);
+          }
+        }
+        const junction=new Set((p.ticks||[]).map(t=>t.ai));
+        path.forEach((a,i)=>{                        // round = smooth anchor, square = corner, red = line junction
+          const J=junction.has(i), A=i===act;
+          ctx.beginPath();
+          if(a.corner) ctx.rect(a.x*pxPerMM-R, a.y*pxPerMM-R, 2*R, 2*R); else ctx.arc(a.x*pxPerMM,a.y*pxPerMM,J?R+1.5:R,0,7);
+          ctx.fillStyle=J?'#B3402F':(A?'#3E6B4F':'#39536B'); ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=1.5; ctx.stroke();
         });
       }
       ctx.restore();
@@ -1326,21 +1348,105 @@ function draw(){
     ctx.fillText(p.name+(tooBig?' · too big for bed':''), tx, ty);
   }
   $('canvasHint').textContent = S.pieces.length
-    ? (S.sel ? (handlesVisible(S.sel, pxPerMM)?'Editing '+S.sel.name+' · tap elsewhere to deselect':'Zoom in to edit '+S.sel.name+"'s points")
+    ? (S.sel ? (handlesVisible(S.sel, pxPerMM)?'Editing '+S.sel.name+' · click an anchor to show its handles · tap elsewhere to deselect':'Zoom in to edit '+S.sel.name+"'s points")
              : 'Tap a piece to select it · drag to pan'+(S.pieces.some(p=>p.on&&p.page===S.pageNum&&!fitInfo(p).ok)?' · hatched = too big for the bed':''))
     : (S.pdf?'Drag to pan · detect pieces when ready':'Load a PDF to begin');
+}
+
+/* ---------------- curve model ----------------
+   A piece's editable outline is a closed path of anchors. A smooth anchor has
+   two tangent handles (in/out, relative to the anchor) — auto-computed until
+   the user drags one; a corner anchor (sharp turn, line junction) has none
+   and its neighbouring segments arrive straight. The path is flattened to
+   p.poly, which everything else (export, packing, extensions) uses. */
+function pathFromPoly(poly, cornerIdx){
+  const n=poly.length, path=[];
+  for(let i=0;i<n;i++){
+    const [px,py]=poly[i], [ax,ay]=poly[(i+n-1)%n], [bx,by]=poly[(i+1)%n];
+    const a1=Math.atan2(py-ay,px-ax), a2=Math.atan2(by-py,bx-px);
+    let turn=Math.abs(((a2-a1)*180/Math.PI+540)%360-180);
+    const corner = (cornerIdx && cornerIdx.has(i)) || turn>35;
+    path.push({x:px, y:py, in:null, out:null, auto:!corner, corner});
+  }
+  autoHandles(path);
+  return path;
+}
+/* Catmull-Rom style tangents for every auto anchor */
+function autoHandles(path, only){
+  const n=path.length;
+  for(let i=0;i<n;i++){
+    const a=path[i]; if(a.corner || !a.auto) continue;
+    if(only!==undefined && Math.abs(i-only)>1 && !(only===0&&i===n-1) && !(only===n-1&&i===0)) continue;
+    const P=path[(i+n-1)%n], N=path[(i+1)%n];
+    let tx=N.x-P.x, ty=N.y-P.y; const L=Math.hypot(tx,ty)||1e-9; tx/=L; ty/=L;
+    const dIn=Math.hypot(a.x-P.x,a.y-P.y), dOut=Math.hypot(N.x-a.x,N.y-a.y);
+    a.in=[-tx*dIn/3, -ty*dIn/3]; a.out=[tx*dOut/3, ty*dOut/3];
+  }
+}
+function bez(a,c1,c2,b,t){ const u=1-t; return [u*u*u*a[0]+3*u*u*t*c1[0]+3*u*t*t*c2[0]+t*t*t*b[0], u*u*u*a[1]+3*u*u*t*c1[1]+3*u*t*t*c2[1]+t*t*t*b[1]]; }
+function segCtrl(path,i){
+  const n=path.length, a=path[i], b=path[(i+1)%n];
+  const c1 = a.out ? [a.x+a.out[0], a.y+a.out[1]] : [a.x,a.y];
+  const c2 = b.in  ? [b.x+b.in[0],  b.y+b.in[1]]  : [b.x,b.y];
+  return {a:[a.x,a.y], c1, c2, b:[b.x,b.y], straight:!a.out && !b.in};
+}
+/* flatten to a polygon; idx[i] = polygon index of anchor i */
+function flattenPath(path){
+  const n=path.length, poly=[], idx=new Array(n);
+  for(let i=0;i<n;i++){
+    const sgm=segCtrl(path,i); idx[i]=poly.length; poly.push(sgm.a);
+    if(sgm.straight) continue;
+    const L=Math.hypot(sgm.b[0]-sgm.a[0],sgm.b[1]-sgm.a[1])+Math.hypot(sgm.c1[0]-sgm.a[0],sgm.c1[1]-sgm.a[1])+Math.hypot(sgm.c2[0]-sgm.b[0],sgm.c2[1]-sgm.b[1]);
+    const k=Math.max(3, Math.ceil(L/1.0));
+    for(let j=1;j<k;j++) poly.push(bez(sgm.a,sgm.c1,sgm.c2,sgm.b,j/k));
+  }
+  return {poly, idx};
+}
+/* rebuild p.poly from p.path, remap extension anchors, refresh bbox */
+function applyPath(p){
+  if(!p.path) return;
+  const {poly, idx}=flattenPath(p.path);
+  p.poly=poly;
+  for(const t of p.ticks||[]) if(t.ai!==undefined){ t.vi=idx[t.ai]; if(p.path[t.ai]){ t.x=p.path[t.ai].x; t.y=p.path[t.ai].y; } }
+  recalcBB(p);
+}
+/* give an old piece (polygon only) a path; junction vertices become corners */
+function ensurePath(p){
+  if(p.path) return;
+  const corners=new Set((p.ticks||[]).map(t=>t.vi));
+  p.path=pathFromPoly(p.poly, corners);
+  for(const t of p.ticks||[]) t.ai=t.vi;
+  if(!p.path0){ p.path0=p.path.map(a=>({...a, in:a.in&&a.in.slice(), out:a.out&&a.out.slice()})); }
+  applyPath(p);
+}
+const clonePath = path => path.map(a=>({...a, in:a.in&&a.in.slice(), out:a.out&&a.out.slice()}));
+/* de Casteljau split of segment i at t, inserting a new anchor that keeps the shape */
+function splitSegment(path, i, t){
+  const n=path.length, a=path[i], b=path[(i+1)%n], S0=segCtrl(path,i);
+  if(S0.straight){
+    path.splice(i+1,0,{x:(a.x+b.x)/2, y:(a.y+b.y)/2, in:null, out:null, auto:false, corner:true});
+    return i+1;
+  }
+  const lerp=(p,q)=>[p[0]+(q[0]-p[0])*t, p[1]+(q[1]-p[1])*t];
+  const p01=lerp(S0.a,S0.c1), p12=lerp(S0.c1,S0.c2), p23=lerp(S0.c2,S0.b);
+  const p012=lerp(p01,p12), p123=lerp(p12,p23), m=lerp(p012,p123);
+  if(a.out){ a.out=[p01[0]-a.x, p01[1]-a.y]; a.auto=false; }
+  if(b.in){ b.in=[p23[0]-b.x, p23[1]-b.y]; b.auto=false; }
+  path.splice(i+1,0,{x:m[0], y:m[1], in:[p012[0]-m[0],p012[1]-m[1]], out:[p123[0]-m[0],p123[1]-m[1]], auto:false, corner:false});
+  return i+1;
 }
 
 /* ---------------- selection & outline editing ---------------- */
 const HANDLE_R=5;                                   // screen px
 /* points are only shown/editable when they're far enough apart to grab */
 function handlesVisible(p, pxPerMM){
+  ensurePath(p);
   let per=0;
-  for(let i=0;i<p.poly.length;i++){
-    const [ax,ay]=p.poly[i], [bx,by]=p.poly[(i+1)%p.poly.length];
-    per+=Math.hypot(bx-ax,by-ay);
+  for(let i=0;i<p.path.length;i++){
+    const a=p.path[i], b=p.path[(i+1)%p.path.length];
+    per+=Math.hypot(b.x-a.x,b.y-a.y);
   }
-  return per/p.poly.length*pxPerMM >= HANDLE_R*2;
+  return per/p.path.length*pxPerMM >= HANDLE_R*2;
 }
 function canvasMM(e){
   const [cx,cy]=contentXY(e);
@@ -1351,16 +1457,27 @@ function hitHandle(mmX, mmY){
   const p=S.sel; if(!p || p.page!==S.pageNum || S.view!=='page') return null;
   const pxPerMM=S.zoom/S.mmPerPx;
   if(!handlesVisible(p,pxPerMM)) return null;
-  // nearest handle wins; each kind has its own grab radius
+  // nearest handle wins; each kind has its own grab radius. Tangent handles
+  // (of the active anchor) take priority, then anchors, then curve midpoints.
   const tolPt=(HANDLE_R+3)/pxPerMM, tolMid=(HANDLE_R*0.6+3)/pxPerMM;
   let best=null, bd=Infinity;
-  for(let i=0;i<p.poly.length;i++){
-    const d=Math.hypot(p.poly[i][0]-mmX, p.poly[i][1]-mmY);
+  const act=S.activeAnchor;
+  if(act!==null && act!==undefined && p.path[act]){
+    const a=p.path[act];
+    for(const side of ['in','out']){
+      if(!a[side]) continue;
+      const d=Math.hypot(a.x+a[side][0]-mmX, a.y+a[side][1]-mmY);
+      if(d<tolPt && d<bd){ bd=d; best={kind:side, i:act}; }
+    }
+    if(best) return best;
+  }
+  for(let i=0;i<p.path.length;i++){
+    const d=Math.hypot(p.path[i].x-mmX, p.path[i].y-mmY);
     if(d<tolPt && d<bd){ bd=d; best={kind:'pt', i}; }
   }
-  for(let i=0;i<p.poly.length;i++){
-    const [ax,ay]=p.poly[i], [bx,by]=p.poly[(i+1)%p.poly.length];
-    const d=Math.hypot((ax+bx)/2-mmX, (ay+by)/2-mmY);
+  for(let i=0;i<p.path.length;i++){
+    const sgm=segCtrl(p.path,i), m=bez(sgm.a,sgm.c1,sgm.c2,sgm.b,0.5);
+    const d=Math.hypot(m[0]-mmX, m[1]-mmY);
     if(d<tolMid && d<bd){ bd=d; best={kind:'mid', i}; }
   }
   return best;
@@ -1372,19 +1489,22 @@ function recalcBB(p){
   p._al=null;
 }
 function selectPiece(p, opts={}){
+  if(S.sel!==p) S.activeAnchor=null;
   S.sel=p;
   const bar=$('editBar');
   if(!p){ bar.hidden=true; refreshPieceUI(); draw(); return; }
   bar.hidden=false;
   $('edName').textContent=p.name;
-  $('edDim').textContent=fmt(p.bb.w,0)+' × '+fmt(p.bb.h,0)+' mm · '+p.poly.length+' pts';
+  ensurePath(p);
+  $('edDim').textContent=fmt(p.bb.w,0)+' × '+fmt(p.bb.h,0)+' mm · '+p.path.length+' anchors';
   $('edGrain').innerHTML = grainChip(p);
   $('edKeep').textContent = p.on ? 'Drop' : 'Keep';
   const cb=$('edConfirm'); cb.hidden = !p.grain || p.grain.manual;
   cb.textContent = (p.grain&&p.grain.confirmed) ? '✓ Grain confirmed' : 'Confirm grain';
   cb.className = (p.grain&&p.grain.confirmed) ? '' : 'warn';
   $('edKeep').className = p.on ? 'warn' : '';
-  $('edReset').disabled = p.poly.length===p.poly0.length && p.poly.every((q,i)=>q[0]===p.poly0[i][0]&&q[1]===p.poly0[i][1]);
+  $('edReset').disabled = !!p.path0 && JSON.stringify(p.path)===JSON.stringify(p.path0);
+  $('edCorner').disabled = S.activeAnchor===null || S.activeAnchor===undefined || !p.path[S.activeAnchor];
   refreshPieceUI();
   if(opts.frame!==false && S.view==='page') framePiece(p, opts.zoom!==false);   // selecting zooms to fit the piece
   draw();
@@ -1408,26 +1528,34 @@ $('edNext').onclick=()=>reviewNext(S.sel);
 $('edName').onclick=()=>{ if(S.sel) renamePiece(S.sel); };
 $('edGrainBtn').onclick=()=>{ if(S.sel) startGrainPick(S.sel); };
 $('edReset').onclick=()=>{ const p=S.sel; if(!p) return;
-  p.poly=p.poly0.map(q=>q.slice()); if(p.ticks0) p.ticks=p.ticks0.map(t=>({...t})); recalcBB(p); selectPiece(p,{frame:false});
+  if(p.path0){ p.path=clonePath(p.path0); if(p.ticks0) p.ticks=p.ticks0.map(t=>({...t})); S.activeAnchor=null; applyPath(p); }
+  else { p.poly=p.poly0.map(q=>q.slice()); if(p.ticks0) p.ticks=p.ticks0.map(t=>({...t})); recalcBB(p); }
+  selectPiece(p,{frame:false});
   setStatus(p.name+' outline restored to the detected one.'); };
-$('edFewer').onclick=()=>{ const p=S.sel; if(!p) return;
-  const keep=new Set((p.ticks||[]).map(t=>t.vi));
-  const before=p.poly.length;
-  // simplify between kept vertices so tick anchors survive; remap their indices
-  const order=[...keep].filter(i=>i>=0&&i<p.poly.length).sort((a,b)=>a-b);
-  let pts=[], map={};
-  if(!order.length){ pts=rdp(p.poly,0.6); }
+$('edFewer').onclick=()=>{ const p=S.sel; if(!p) return; ensurePath(p);
+  // simplify the anchor polygon between junction anchors (which always stay);
+  // the curve is re-smoothed automatically
+  const keep=new Set((p.ticks||[]).map(t=>t.ai));
+  const before=p.path.length, apts=p.path.map(a=>[a.x,a.y]);
+  const order=[...keep].filter(i=>i>=0&&i<apts.length).sort((a,b)=>a-b);
+  let pts=[], map={}, corners=new Set();
+  if(!order.length){ pts=rdp(apts,0.6); }
   else{
     for(let k=0;k<order.length;k++){
       const a=order[k], b=order[(k+1)%order.length];
-      const seg=[]; let i=a; do{ seg.push(p.poly[i]); i=(i+1)%p.poly.length; }while(i!==b); seg.push(p.poly[b]);
+      const seg=[]; let i=a; do{ seg.push(apts[i]); i=(i+1)%apts.length; }while(i!==b); seg.push(apts[b]);
       const simp=rdp(seg,0.6);
-      map[a]=pts.length; pts.push(...simp.slice(0,-1));
+      map[a]=pts.length; corners.add(pts.length); pts.push(...simp.slice(0,-1));
     }
   }
-  for(const t of p.ticks||[]) if(map[t.vi]!==undefined) t.vi=map[t.vi];
-  p.poly=pts; recalcBB(p); selectPiece(p,{frame:false});
-  setStatus(p.name+': '+before+' → '+pts.length+' points.'); };
+  for(const t of p.ticks||[]) if(map[t.ai]!==undefined) t.ai=map[t.ai];
+  p.path=pathFromPoly(pts, corners); S.activeAnchor=null; applyPath(p); selectPiece(p,{frame:false});
+  setStatus(p.name+': '+before+' → '+pts.length+' anchors.'); };
+$('edCorner').onclick=()=>{ const p=S.sel, i=S.activeAnchor; if(!p||i===null||i===undefined||!p.path[i]) return;
+  const a=p.path[i];
+  if(a.corner){ a.corner=false; a.auto=true; autoHandles(p.path, i); }
+  else { a.corner=true; a.in=a.out=null; a.auto=false; }
+  applyPath(p); selectPiece(p,{frame:false}); };
 $('edDone').onclick=()=>selectPiece(null);
 function renamePiece(p){
   const v=prompt('Piece name (symbols such as / are fine; file names are derived from it):', p.name);
@@ -1451,14 +1579,14 @@ async function startGrainPick(p){
     const [mmX,mmY]=canvasMM(e);
     const hh = S.grainPick ? null : hitHandle(mmX,mmY);
     if(hh){
-      const p=S.sel;
-      let i=hh.i;
-      if(hh.kind==='mid'){                            // insert a new point on this edge
-        const [ax,ay]=p.poly[i], [bx,by]=p.poly[(i+1)%p.poly.length];
-        p.poly.splice(i+1,0,[(ax+bx)/2,(ay+by)/2]); ticksAfterInsert(p,i+1); i=i+1;
+      const p=S.sel; ensurePath(p);
+      let i=hh.i, kind=hh.kind;
+      if(kind==='mid'){                               // insert an anchor at the curve's midpoint
+        i=splitSegment(p.path,i,0.5); ticksAfterInsert(p,i); kind='pt';
       }
-      drag={id:e.pointerId, p, i, moved:hh.kind==='mid'};
-      cv.setPointerCapture(e.pointerId); return;
+      S.activeAnchor=i;
+      drag={id:e.pointerId, p, i, kind, alt:e.altKey, moved:hh.kind==='mid'};
+      cv.setPointerCapture(e.pointerId); draw(); return;
     }
     pan={id:e.pointerId, x:e.clientX, y:e.clientY, sl:wrap.scrollLeft, st:wrap.scrollTop, moved:false};
     cv.setPointerCapture(e.pointerId);
@@ -1470,7 +1598,19 @@ async function startGrainPick(p){
     }
     if(drag && e.pointerId===drag.id){
       const [mmX,mmY]=canvasMM(e);
-      drag.p.poly[drag.i]=[mmX,mmY]; drag.moved=true; draw(); return;
+      const p=drag.p, a=p.path[drag.i];
+      if(drag.kind==='pt'){
+        a.x=mmX; a.y=mmY;
+        autoHandles(p.path, drag.i);                 // auto neighbours follow; manual handles ride along
+      }else{                                          // tangent handle
+        const side=drag.kind, other=side==='in'?'out':'in';
+        a[side]=[mmX-a.x, mmY-a.y]; a.auto=false;
+        if(a[other] && !(e.altKey||drag.alt)){         // keep the tangent smooth: mirror direction, keep length
+          const L=Math.hypot(a[other][0],a[other][1]), d=Math.hypot(a[side][0],a[side][1])||1e-9;
+          a[other]=[-a[side][0]/d*L, -a[side][1]/d*L];
+        }
+      }
+      applyPath(p); drag.moved=true; draw(); return;
     }
     if(!pan || e.pointerId!==pan.id) return;
     const dx=e.clientX-pan.x, dy=e.clientY-pan.y;
@@ -1480,7 +1620,7 @@ async function startGrainPick(p){
   });
   const end=e=>{
     if(drag && e.pointerId===drag.id){
-      recalcBB(drag.p); S.suppressClick=true;
+      applyPath(drag.p); S.suppressClick=true;
       selectPiece(drag.p,{frame:false}); drag=null; return;
     }
     if(!pan || e.pointerId!==pan.id) return;
@@ -1492,9 +1632,10 @@ async function startGrainPick(p){
     const [mmX,mmY]=canvasMM(e);
     const hh=hitHandle(mmX,mmY);
     if(!hh || hh.kind!=='pt') return;
-    const p=S.sel;
-    if(p.poly.length<=3){ setStatus('A piece needs at least 3 points.'); return; }
-    p.poly.splice(hh.i,1); ticksAfterRemove(p,hh.i); recalcBB(p); selectPiece(p,{frame:false});
+    const p=S.sel; ensurePath(p);
+    if(p.path.length<=3){ setStatus('A piece needs at least 3 points.'); return; }
+    p.path.splice(hh.i,1); ticksAfterRemove(p,hh.i); autoHandles(p.path); S.activeAnchor=null;
+    applyPath(p); selectPiece(p,{frame:false});
   });
 }
 
@@ -2118,10 +2259,12 @@ function serializeProject(){
     pdf:S.pdfInfo, pagesIncluded:[...S.pageInc].sort((a,b)=>a-b), viewPage:S.pageNum, settings,
     pieces:S.pieces.map(p=>({
       page:p.page, name:p.name, on:p.on, label:p.label||null, nameUnsure:!!p.nameUnsure, nameMissing:!!p.nameMissing,
-      poly:p.poly.map(([x,y])=>[r2(x),r2(y)]),
-      poly0:p.poly0.map(([x,y])=>[r2(x),r2(y)]),
-      ticks:(p.ticks||[]).map(t=>({x:r2(t.x),y:r2(t.y),dx:+(t.dx??t.nx).toFixed(4),dy:+(t.dy??t.ny).toFixed(4),vi:t.vi})),
-      ticks0:(p.ticks0||[]).map(t=>({x:r2(t.x),y:r2(t.y),dx:+(t.dx??t.nx).toFixed(4),dy:+(t.dy??t.ny).toFixed(4),vi:t.vi})),
+      poly:p.path?[]:p.poly.map(([x,y])=>[r2(x),r2(y)]),          // rebuilt from the path on load
+      poly0:p.path0?[]:p.poly0.map(([x,y])=>[r2(x),r2(y)]),
+      ticks:(p.ticks||[]).map(t=>({x:r2(t.x),y:r2(t.y),dx:+(t.dx??t.nx).toFixed(4),dy:+(t.dy??t.ny).toFixed(4),vi:t.vi,ai:t.ai})),
+      path:(p.path||[]).map(a=>({x:r2(a.x),y:r2(a.y),in:a.in&&a.in.map(r2),out:a.out&&a.out.map(r2),auto:!!a.auto,corner:!!a.corner})),
+      path0:(p.path0||[]).map(a=>({x:r2(a.x),y:r2(a.y),in:a.in&&a.in.map(r2),out:a.out&&a.out.map(r2),auto:!!a.auto,corner:!!a.corner})),
+      ticks0:(p.ticks0||[]).map(t=>({x:r2(t.x),y:r2(t.y),dx:+(t.dx??t.nx).toFixed(4),dy:+(t.dy??t.ny).toFixed(4),vi:t.vi,ai:t.ai})),
       grain:p.grain ? {x1:r2(p.grain.x1),y1:r2(p.grain.y1),x2:r2(p.grain.x2),y2:r2(p.grain.y2),
                        angle:r2(p.grain.angle),len:r2(p.grain.len),manual:!!p.grain.manual,confirmed:!!(p.grain.confirmed||p.grain.manual)} : null,
     })),
@@ -2139,9 +2282,10 @@ function applyProject(proj, source){
   [...$('pageToggles').querySelectorAll('input')].forEach((cb,i)=>{ cb.checked=S.pageInc.has(i+1); });
   S.pieces=proj.pieces.map((q,i)=>({
     id:i+1, page:q.page, name:q.name, on:q.on!==false, label:q.label||null, nameUnsure:!!q.nameUnsure, nameMissing:!!q.nameMissing,
-    poly:q.poly.map(v=>v.slice()), poly0:(q.poly0||q.poly).map(v=>v.slice()), grain:q.grain||null, ticks:q.ticks||[], ticks0:q.ticks0||q.ticks||[],
+    poly:(q.poly||[]).map(v=>v.slice()), poly0:((q.poly0&&q.poly0.length)?q.poly0:(q.poly||[])).map(v=>v.slice()), grain:q.grain||null, ticks:q.ticks||[], ticks0:q.ticks0||q.ticks||[],
+    path:(q.path&&q.path.length)?q.path.map(a=>({...a})):null, path0:(q.path0&&q.path0.length)?q.path0.map(a=>({...a})):null,
   }));
-  S.pieces.forEach(recalcBB);
+  S.pieces.forEach(p=>{ if(p.path){ if(!p.path0) p.path0=clonePath(p.path); applyPath(p); } else recalcBB(p); });
   selectPiece(null);
   const pg=Math.min(Math.max(proj.viewPage||1,1),S.pdf.numPages);
   showPage(pg).then(()=>{ fitPage(); refreshPieceUI(); draw(); if(S.pieces.length) foldSetupSections();
