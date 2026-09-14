@@ -272,6 +272,8 @@
     <div class="row"><label>Rotate pieces so grain runs vertical</label><input type="checkbox" id="alignGrain" checked></div>
     <div class="row"><label>Pack several pieces per bed</label><input type="checkbox" id="pack" checked></div>
     <div class="row"><label>Spacing between pieces (mm)</label><input type="number" id="gap" value="8" min="2" max="40" step="1"></div>
+    <div class="row"><label>Edge ticks where internal lines meet the outline</label><input type="checkbox" id="tickOn" checked></div>
+    <div class="row"><label>Tick reach each side (mm)</label><input type="number" id="tickLen" value="4" min="1" max="15" step="1"></div>
     <div class="row"><label>Rotate 90° if needed to fit — <b>breaks grain</b></label><input type="checkbox" id="autoRot"></div>
     <button class="act ghost" id="btnBeds" disabled>Preview bed layout</button>
     <button class="act ghost" id="btnSVG" disabled>Download SVGs</button>
@@ -514,7 +516,8 @@ function detectPieces(imgData, mmPerPx, thr, minPieceMM, gapMM){
               minY:Math.min(...ys), maxY:Math.max(...ys)};
     bb.w=bb.maxX-bb.minX; bb.h=bb.maxY-bb.minY;
     const grain = findGrain(lbl, dark, w, h, id, minx, miny, maxx, maxy, mmPerPx, poly);
-    pieces.push({id, name:'piece-'+pieces.length, poly, poly0:poly.map(q=>q.slice()), bb, grain, on:true});
+    const ticks = findJunctions(lbl, dark, w, h, id, minx, miny, maxx, maxy, mmPerPx, poly);
+    pieces.push({id, name:'piece-'+pieces.length, poly, poly0:poly.map(q=>q.slice()), bb, grain, ticks, on:true});
   }
   // stable reading order: top-to-bottom, left-to-right
   pieces.sort((a,b)=> (a.bb.minY-b.bb.minY) || (a.bb.minX-b.bb.minX));
@@ -699,6 +702,92 @@ function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly){
           angle:ang, len:best.len*mmPerPx, manual:false, confirmed:false};
 }
 
+/* ---------------- edge ticks ----------------
+   Where an internal line (seam line end, dart leg, fold line, the pattern's
+   own notch) meets the outline, remember the spot and the outward normal so
+   a short tick can be printed across the cut line. */
+function nearestOnPoly(x, y, poly){
+  let best=null, bd=1e18;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    const [ax,ay]=poly[j], [bx,by]=poly[i];
+    const vx=bx-ax, vy=by-ay, L2=vx*vx+vy*vy||1e-9;
+    let t=((x-ax)*vx+(y-ay)*vy)/L2; t=Math.max(0,Math.min(1,t));
+    const px=ax+t*vx, py=ay+t*vy, d=(x-px)**2+(y-py)**2;
+    if(d<bd){ bd=d; const L=Math.sqrt(L2); best={x:px, y:py, nx:vy/L, ny:-vx/L, d:Math.sqrt(d)}; }
+  }
+  if(best && pointInPoly(best.x+best.nx*1.5, best.y+best.ny*1.5, poly)){ best.nx=-best.nx; best.ny=-best.ny; }
+  return best;
+}
+function findJunctions(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly){
+  const bw=maxx-minx+1, bh=maxy-miny+1, n=bw*bh;
+  const nearBg=new Uint8Array(n), ink=new Uint8Array(n);
+  for(let y=0;y<bh;y++)for(let x=0;x<bw;x++){
+    const gi=(miny+y)*W+(minx+x);
+    if(lbl[gi]<0) nearBg[y*bw+x]=1;
+  }
+  for(let pass=0;pass<3;pass++){
+    const prev=nearBg.slice();
+    for(let y=0;y<bh;y++)for(let x=0;x<bw;x++){
+      if(prev[y*bw+x]) continue;
+      if((x>0&&prev[y*bw+x-1])||(x<bw-1&&prev[y*bw+x+1])||
+         (y>0&&prev[(y-1)*bw+x])||(y<bh-1&&prev[(y+1)*bw+x])) nearBg[y*bw+x]=1;
+    }
+  }
+  for(let y=0;y<bh;y++)for(let x=0;x<bw;x++){
+    const li=y*bw+x, gi=(miny+y)*W+(minx+x);
+    if(dark[gi] && lbl[gi]===id && !nearBg[li]) ink[li]=1;
+  }
+  const seen=new Uint8Array(n), q=new Int32Array(n);
+  const minPx=3/mmPerPx;                                   // a mark shorter than 3 mm is noise
+  const contacts=[];
+  for(let s=0;s<n;s++){
+    if(!ink[s]||seen[s]) continue;
+    let head=0, tail=0; q[tail++]=s; seen[s]=1;
+    let cminx=bw,cmaxx=0,cminy=bh,cmaxy=0; const touch=[];
+    while(head<tail){
+      const i=q[head++], x=i%bw, y=(i-x)/bw;
+      if(x<cminx)cminx=x; if(x>cmaxx)cmaxx=x; if(y<cminy)cminy=y; if(y>cmaxy)cmaxy=y;
+      let edge=false;
+      for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+        const xx=x+dx, yy=y+dy; if(xx<0||yy<0||xx>=bw||yy>=bh) continue;
+        const j=yy*bw+xx;
+        if(nearBg[j]) edge=true;
+        else if(ink[j]&&!seen[j]&&(dx===0||dy===0)){ seen[j]=1; q[tail++]=j; }
+      }
+      if(edge) touch.push([x,y]);
+    }
+    if(Math.max(cmaxx-cminx,cmaxy-cminy)<minPx || !touch.length) continue;
+    // one contact per cluster of touching pixels (a line end touches in a small patch)
+    const used=new Uint8Array(touch.length);
+    for(let a=0;a<touch.length;a++){
+      if(used[a]) continue;
+      let sx=0,sy=0,c=0;
+      for(let b=a;b<touch.length;b++){
+        if(used[b]) continue;
+        if(Math.hypot(touch[b][0]-touch[a][0], touch[b][1]-touch[a][1])<3/mmPerPx){ used[b]=1; sx+=touch[b][0]; sy+=touch[b][1]; c++; }
+      }
+      contacts.push([(minx+sx/c)*mmPerPx, (miny+sy/c)*mmPerPx]);
+    }
+  }
+  // snap each contact to the outline, keep the outward normal, drop near-duplicates
+  const ticks=[];
+  for(const [cx,cy] of contacts){
+    const t=nearestOnPoly(cx,cy,poly);
+    if(!t || t.d>4) continue;
+    if(ticks.some(o=>Math.hypot(o.x-t.x,o.y-t.y)<3)) continue;
+    ticks.push({x:t.x, y:t.y, nx:t.nx, ny:t.ny});
+    if(ticks.length>=40) break;
+  }
+  return ticks;
+}
+/* tick as a segment in page mm, crossing the outline */
+function tickSegment(p, t){
+  const L=+$('tickLen').value;
+  return [[t.x-t.nx*L, t.y-t.ny*L], [t.x+t.nx*L, t.y+t.ny*L]];
+}
+const ticksOn = () => $('tickOn').checked;
+const L0 = () => ticksOn() ? +$('tickLen').value : 0;   // margin needed around a piece for its ticks
+
 const norm90 = d => ((d+90)%180+180)%180-90;
 
 /* aligned polygon: rotated so grain runs vertical (if enabled and known) */
@@ -717,8 +806,25 @@ function alignedPoly(p){
   const xs=pts.map(q=>q[0]), ys=pts.map(q=>q[1]);
   const minX=Math.min(...xs), minY=Math.min(...ys);
   p._al={d, pts:pts.map(([x,y])=>[x-minX,y-minY]),
-         w:Math.max(...xs)-minX, h:Math.max(...ys)-minY};
+         w:Math.max(...xs)-minX, h:Math.max(...ys)-minY, minX, minY,
+         cx:(p.bb.minX+p.bb.maxX)/2, cy:(p.bb.minY+p.bb.maxY)/2};
   return p._al;
+}
+/* apply the same alignment + fit rotation as exportPoly to arbitrary page-mm points */
+function exportPts(p, pts){
+  const a=alignedPoly(p), fit=fitInfo(p);
+  const r=a.d*Math.PI/180, co=Math.cos(r), si=Math.sin(r);
+  let out=pts.map(([x,y])=>{
+    if(Math.abs(a.d)>0.05){ const X=a.cx+(x-a.cx)*co-(y-a.cy)*si, Y=a.cy+(x-a.cx)*si+(y-a.cy)*co; x=X; y=Y; }
+    return [x-a.minX, y-a.minY];
+  });
+  if(fit.rot) out=out.map(([x,y])=>[a.h-y, x]);
+  return out;
+}
+/* tick segments for export, in the piece's export frame */
+function exportTicks(p){
+  if(!ticksOn() || !p.ticks) return [];
+  return p.ticks.map(t=>exportPts(p, tickSegment(p,t)));
 }
 
 /* ---------------- canvas & refinement ---------------- */
@@ -775,6 +881,10 @@ function drawBeds(){
       ctx.fillStyle = it.rot ? 'rgba(179,64,47,.18)' : (sel ? 'rgba(57,83,107,.25)' : 'rgba(179,64,47,.10)');
       ctx.fill();
       ctx.strokeStyle = sel ? '#39536B' : (it.rot ? '#B3402F' : '#26221C'); ctx.lineWidth = sel ? 2.5 : 1.2; ctx.stroke();
+      const tks=placedTicks(it);
+      if(tks.length){ ctx.strokeStyle='#39536B'; ctx.lineWidth=1.2; ctx.beginPath();
+        for(const [[x1,y1],[x2,y2]] of tks){ ctx.moveTo((x1+ox)*k,(y1+oy)*k); ctx.lineTo((x2+ox)*k,(y2+oy)*k); }
+        ctx.stroke(); }
       // name + rotation warning
       ctx.font='600 '+Math.max(9,Math.min(13,3.2*k))+'px system-ui'; ctx.textBaseline='top';
       ctx.fillStyle='#B3402F';
@@ -860,6 +970,13 @@ function draw(){
       ctx.strokeStyle='#a49c8d'; ctx.setLineDash([2,5]); ctx.lineWidth=1.4;
     }
     ctx.stroke(); ctx.setLineDash([]);
+    // edge ticks
+    if(p.on && ticksOn() && p.ticks && p.ticks.length){
+      ctx.strokeStyle='#39536B'; ctx.lineWidth=1.6; ctx.beginPath();
+      for(const t of p.ticks){ const [[x1,y1],[x2,y2]]=tickSegment(p,t);
+        ctx.moveTo(x1*pxPerMM,y1*pxPerMM); ctx.lineTo(x2*pxPerMM,y2*pxPerMM); }
+      ctx.stroke();
+    }
     // grain arrow
     if(p.grain){
       const g=p.grain;
@@ -1239,6 +1356,7 @@ function refreshPieceUI(){
   scheduleAutosave();
 }
 ['bedX','bedY','autoRot'].forEach(id=>$(id).addEventListener('change',refreshPieceUI));
+['tickOn','tickLen'].forEach(id=>$(id).addEventListener('change',draw));
 $('alignGrain').addEventListener('change',()=>{ S.pieces.forEach(p=>p._al=null); refreshPieceUI(); });
 $('bedPreset').addEventListener('change', e=>{
   if(e.target.value==='custom') return;
@@ -1300,6 +1418,9 @@ function packSheets(pieces, bedX, bedY, gap, margin=5){
   }
   return sheets;
 }
+function placedTicks(item){
+  return exportTicks(item.p).map(seg=>seg.map(([x,y])=>[x+item.x, y+item.y]));
+}
 function placedPoly(item){
   let pts=exportPoly(item.p);                 // origin at piece top-left, rot applied
   return pts.map(([x,y])=>[x+item.x, y+item.y]);   // layout space, y-down
@@ -1319,6 +1440,8 @@ $('btnSVG').addEventListener('click', ()=>{
         const pts=placedPoly(it);
         body+='  <path d="M '+pts.map(q=>fmt(q[0],2)+' '+fmt(q[1],2)).join(' L ')
           +' Z" fill="none" stroke="black" stroke-width="0.4"/>\n';
+        for(const [[x1,y1],[x2,y2]] of placedTicks(it))
+          body+='  <path d="M '+fmt(x1,2)+' '+fmt(y1,2)+' L '+fmt(x2,2)+' '+fmt(y2,2)+'" stroke="#39536B" stroke-width="0.4"/>\n';
         body+='  <text x="'+fmt(it.x+3,1)+'" y="'+fmt(it.y+8,1)
           +'" font-size="6" fill="#B3402F">'+it.p.name+(it.rot?' (rot 90°)':'')+'</text>\n';
       }
@@ -1334,9 +1457,10 @@ $('btnSVG').addEventListener('click', ()=>{
     const xs=pts.map(q=>q[0]), ys=pts.map(q=>q[1]);
     const w=Math.max(...xs), h=Math.max(...ys);
     const d='M '+pts.map(q=>fmt(q[0],2)+' '+fmt(q[1],2)).join(' L ')+' Z';
-    const svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+fmt(w,1)+'mm" height="'
-      +fmt(h,1)+'mm" viewBox="0 0 '+fmt(w,1)+' '+fmt(h,1)+'">\n'
-      +'  <path d="'+d+'" fill="none" stroke="black" stroke-width="0.4"/>\n</svg>\n';
+    const tk=exportTicks(p).map(([[x1,y1],[x2,y2]])=>'  <path d="M '+fmt(x1,2)+' '+fmt(y1,2)+' L '+fmt(x2,2)+' '+fmt(y2,2)+'" stroke="#39536B" stroke-width="0.4"/>\n').join('');
+    const svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+fmt(w+2*L0(),1)+'mm" height="'
+      +fmt(h+2*L0(),1)+'mm" viewBox="'+fmt(-L0(),1)+' '+fmt(-L0(),1)+' '+fmt(w+2*L0(),1)+' '+fmt(h+2*L0(),1)+'">\n'
+      +'  <path d="'+d+'" fill="none" stroke="black" stroke-width="0.4"/>\n'+tk+'</svg>\n';
     setTimeout(()=>download(fileNameFor(p)+'.svg', svg, 'image/svg+xml'), i++*350);
   }
   setStatus('Downloading '+i+' SVG file'+(i===1?'':'s')+'…');
@@ -1408,6 +1532,12 @@ function makeSheetGcode(sheet, num, total, soloName){
         const w=Math.max(...xs), h=Math.max(...ys);
         pts=pts.map(([x,y])=>[x+(bedX-w)/2, y+(bedY-h)/2]);
       }
+      let ticks=placedTicks(it);
+      if(it.centre){
+        const xs=placedPoly(it).map(q=>q[0]), ys=placedPoly(it).map(q=>q[1]);
+        const w=Math.max(...xs), h=Math.max(...ys);
+        ticks=ticks.map(seg=>seg.map(([x,y])=>[x+(bedX-w)/2, y+(bedY-h)/2]));
+      }
       const P=pts.map(([x,y])=>[x, bedY-y]);      // layout y-down -> bed y-up
       G.push('; ---- '+it.p.name+(it.rot?' (rotated 90 - grain broken)':'')+' ----');
       const [sx,sy]=P[0];
@@ -1424,6 +1554,18 @@ function makeSheetGcode(sheet, num, total, soloName){
       }
       if(retr) G.push('G1 E-'+gnum(retr)+' F1800 ; retract');
       G.push('G0 Z'+gnum(z+hop)+' F1200');
+      if(ticks.length){
+        G.push('; edge ticks ('+ticks.length+')');
+        for(const [[x1,y1],[x2,y2]] of ticks){
+          const ax=x1, ay=bedY-y1, bx=x2, by=bedY-y2;
+          G.push('G0 X'+gnum(ax)+' Y'+gnum(ay)+' F'+travel);
+          G.push('G0 Z'+gnum(z)+' F1200');
+          if(retr) G.push('G1 E'+gnum(retr)+' F1800');
+          G.push('G1 X'+gnum(bx)+' Y'+gnum(by)+' E'+gnum(Math.hypot(bx-ax,by-ay)*ePerMM)+' F'+speed);
+          if(retr) G.push('G1 E-'+gnum(retr)+' F1800');
+          G.push('G0 Z'+gnum(z+hop)+' F1200');
+        }
+      }
     }
   }
   G.push('; ---- done ----','M104 S0', tBed>0?'M140 S0':';',
@@ -1612,7 +1754,7 @@ $('btnOCR').addEventListener('click', async ()=>{
 /* ---------------- project save / load / autosave ---------------- */
 const PROJECT_FORMAT='pattern2gcode-project', PROJECT_VERSION=1;
 const SETTING_IDS=['dpiSel','thr','minPiece','gapClose','bedPreset','bedX','bedY','lineW','layerH',
-  'nLayers','zOff','speed','travel','flow','filD','tNoz','tBed','retr','alignGrain','pack','gap','autoRot'];
+  'nLayers','zOff','speed','travel','flow','filD','tNoz','tBed','retr','alignGrain','pack','gap','autoRot','tickOn','tickLen'];
 const AUTOSAVE_KEY=h=>'p2g:'+h;
 
 async function hashBytes(buf){
@@ -1635,6 +1777,7 @@ function serializeProject(){
       page:p.page, name:p.name, on:p.on, label:p.label||null, nameUnsure:!!p.nameUnsure, nameMissing:!!p.nameMissing,
       poly:p.poly.map(([x,y])=>[r2(x),r2(y)]),
       poly0:p.poly0.map(([x,y])=>[r2(x),r2(y)]),
+      ticks:(p.ticks||[]).map(t=>({x:r2(t.x),y:r2(t.y),nx:+t.nx.toFixed(4),ny:+t.ny.toFixed(4)})),
       grain:p.grain ? {x1:r2(p.grain.x1),y1:r2(p.grain.y1),x2:r2(p.grain.x2),y2:r2(p.grain.y2),
                        angle:r2(p.grain.angle),len:r2(p.grain.len),manual:!!p.grain.manual,confirmed:!!(p.grain.confirmed||p.grain.manual)} : null,
     })),
@@ -1652,7 +1795,7 @@ function applyProject(proj, source){
   [...$('pageToggles').querySelectorAll('input')].forEach((cb,i)=>{ cb.checked=S.pageInc.has(i+1); });
   S.pieces=proj.pieces.map((q,i)=>({
     id:i+1, page:q.page, name:q.name, on:q.on!==false, label:q.label||null, nameUnsure:!!q.nameUnsure, nameMissing:!!q.nameMissing,
-    poly:q.poly.map(v=>v.slice()), poly0:(q.poly0||q.poly).map(v=>v.slice()), grain:q.grain||null,
+    poly:q.poly.map(v=>v.slice()), poly0:(q.poly0||q.poly).map(v=>v.slice()), grain:q.grain||null, ticks:q.ticks||[],
   }));
   S.pieces.forEach(recalcBB);
   selectPiece(null);
