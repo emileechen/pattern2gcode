@@ -714,7 +714,11 @@ function alignedPoly(p){
 }
 
 /* ---------------- canvas & refinement ---------------- */
-$('zoom').addEventListener('input', draw);
+$('zoom').addEventListener('input', ()=>{
+  const cv=$('cv'), [cx,cy]=viewCentre(), w0=cv.width||1, h0=cv.height||1;
+  draw();
+  centreOn(cx/w0*cv.width, cy/h0*cv.height);        // same fraction of the canvas stays centred
+});
 /* zoom so the whole page fits inside the canvas area */
 /* ---------------- bed layout preview ---------------- */
 const BED_GAP_MM=25, BED_LABEL_MM=12;
@@ -803,11 +807,29 @@ function fitPage(){
   const z=$('zoom');
   z.value=Math.max(+z.min, Math.min(+z.max, Math.floor(fit*100)));
   draw();
-  wrap.scrollLeft=0; wrap.scrollTop=0;
+  const cv=$('cv'); centreOn(cv.width/2, cv.height/2);
 }
 $('btnFit').addEventListener('click', fitPage);
+/* half a viewport of padding around the canvas so any point — even a piece on
+   the page edge — can be scrolled to the centre of the view */
+function padCanvas(){
+  const wrap=$('canvasWrap'), cv=$('cv');
+  cv.style.margin=Math.round(wrap.clientHeight/2)+'px '+Math.round(wrap.clientWidth/2)+'px';
+}
+/* scroll so that canvas-pixel point (px,py) sits at the centre of the view */
+function centreOn(px, py){
+  const wrap=$('canvasWrap'), cv=$('cv');
+  wrap.scrollLeft=Math.round(cv.offsetLeft+px-wrap.clientWidth/2);
+  wrap.scrollTop =Math.round(cv.offsetTop +py-wrap.clientHeight/2);
+}
+/* canvas-pixel point currently at the centre of the view */
+function viewCentre(){
+  const wrap=$('canvasWrap'), cv=$('cv');
+  return [wrap.scrollLeft+wrap.clientWidth/2-cv.offsetLeft, wrap.scrollTop+wrap.clientHeight/2-cv.offsetTop];
+}
 function draw(){
   const cv=$('cv'); if(!S.imgCanvas){ return; }
+  padCanvas();
   if(S.view==='beds'){ drawBeds(); return; }
   const z = +$('zoom').value/100 * Math.min(1, 1100/S.imgCanvas.width);
   S.zoom=z;
@@ -962,11 +984,8 @@ function framePiece(p, zoomTo){
     const z=$('zoom'); z.value=Math.max(+z.min, Math.min(+z.max, Math.floor(fit*100)));
     draw();
   }
-  const pxPerMM=S.zoom/S.mmPerPx, cv=$('cv');
-  const left=cv.offsetLeft+p.bb.minX*pxPerMM, top=cv.offsetTop+p.bb.minY*pxPerMM;
-  const w=p.bb.w*pxPerMM, h=p.bb.h*pxPerMM;
-  wrap.scrollLeft=Math.round(left+w/2-wrap.clientWidth/2);
-  wrap.scrollTop =Math.round(top+h/2-wrap.clientHeight/2);
+  const pxPerMM=S.zoom/S.mmPerPx;
+  centreOn((p.bb.minX+p.bb.w/2)*pxPerMM, (p.bb.minY+p.bb.h/2)*pxPerMM);
 }
 $('edKeep').onclick=()=>{ if(S.sel){ S.sel.on=!S.sel.on; selectPiece(S.sel,{frame:false}); } };
 $('edConfirm').onclick=()=>confirmGrain(S.sel);
