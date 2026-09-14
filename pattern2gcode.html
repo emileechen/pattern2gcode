@@ -272,8 +272,10 @@
     <div class="row"><label>Rotate pieces so grain runs vertical</label><input type="checkbox" id="alignGrain" checked></div>
     <div class="row"><label>Pack several pieces per bed</label><input type="checkbox" id="pack" checked></div>
     <div class="row"><label>Spacing between pieces (mm)</label><input type="number" id="gap" value="8" min="2" max="40" step="1"></div>
-    <div class="row"><label>Edge ticks where internal lines meet the outline</label><input type="checkbox" id="tickOn" checked></div>
-    <div class="row"><label>Tick reach each side (mm)</label><input type="number" id="tickLen" value="4" min="1" max="15" step="1"></div>
+    <div class="row"><label>Extend sew/fold lines through the cut line</label><input type="checkbox" id="tickOn" checked></div>
+    <div class="row"><label>Extension outside the cut line (mm)</label><input type="number" id="tickOut" value="8" min="0" max="30" step="1"></div>
+    <div class="row"><label>Overlap inside, onto the line (mm)</label><input type="number" id="tickIn" value="3" min="0" max="15" step="1"></div>
+    <div class="note">Each internal line that reaches the outline is continued straight on past the cut line, so you can see where it runs and at what angle. The part outside is scrap; the overlap inside sits in the seam allowance.</div>
     <div class="row"><label>Rotate 90° if needed to fit — <b>breaks grain</b></label><input type="checkbox" id="autoRot"></div>
     <button class="act ghost" id="btnBeds" disabled>Preview bed layout</button>
     <button class="act ghost" id="btnSVG" disabled>Download SVGs</button>
@@ -743,9 +745,9 @@ function findJunctions(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, pol
   for(let s=0;s<n;s++){
     if(!ink[s]||seen[s]) continue;
     let head=0, tail=0; q[tail++]=s; seen[s]=1;
-    let cminx=bw,cmaxx=0,cminy=bh,cmaxy=0; const touch=[];
+    let cminx=bw,cmaxx=0,cminy=bh,cmaxy=0; const touch=[], px=[];
     while(head<tail){
-      const i=q[head++], x=i%bw, y=(i-x)/bw;
+      const i=q[head++], x=i%bw, y=(i-x)/bw; px.push([x,y]);
       if(x<cminx)cminx=x; if(x>cmaxx)cmaxx=x; if(y<cminy)cminy=y; if(y>cmaxy)cmaxy=y;
       let edge=false;
       for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
@@ -766,27 +768,50 @@ function findJunctions(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, pol
         if(used[b]) continue;
         if(Math.hypot(touch[b][0]-touch[a][0], touch[b][1]-touch[a][1])<3/mmPerPx){ used[b]=1; sx+=touch[b][0]; sy+=touch[b][1]; c++; }
       }
-      contacts.push([(minx+sx/c)*mmPerPx, (miny+sy/c)*mmPerPx]);
+      // direction(s) of the line at this end: histogram the bearings of the
+      // line's pixels near the contact; each peak is a line arriving here
+      // (two at a corner), and the extension runs the opposite way, outward
+      const cx=sx/c, cy=sy/c, R=8/mmPerPx, r0=1.5/mmPerPx;
+      const bins=new Array(36).fill(0), vx=new Array(36).fill(0), vy=new Array(36).fill(0);
+      for(const [x,y] of px){
+        const d=Math.hypot(x-cx,y-cy); if(d<r0||d>R) continue;
+        const a=Math.atan2(y-cy,x-cx), b=((Math.round(a/(Math.PI/18))%36)+36)%36;
+        bins[b]++; vx[b]+=(x-cx)/d; vy[b]+=(y-cy)/d;
+      }
+      const peak=Math.max(...bins); if(!peak) continue;
+      const taken=new Array(36).fill(false);
+      for(let b=0;b<36;b++){
+        if(taken[b] || bins[b]<0.25*peak) continue;
+        // local maximum over ±2 bins → one line; pool ±2 bins for its direction
+        let isMax=true; for(let k=-2;k<=2;k++) if(bins[(b+k+36)%36]>bins[b]) isMax=false;
+        if(!isMax) continue;
+        let ax=0, ay=0; for(let k=-2;k<=2;k++){ const j=(b+k+36)%36; ax+=vx[j]; ay+=vy[j]; taken[j]=true; }
+        const L=Math.hypot(ax,ay); if(L<1e-6) continue;
+        contacts.push({x:(minx+cx)*mmPerPx, y:(miny+cy)*mmPerPx, dx:-ax/L, dy:-ay/L});
+      }
     }
   }
   // snap each contact to the outline, keep the outward normal, drop near-duplicates
   const ticks=[];
-  for(const [cx,cy] of contacts){
-    const t=nearestOnPoly(cx,cy,poly);
+  for(const c of contacts){
+    const t=nearestOnPoly(c.x,c.y,poly);
     if(!t || t.d>4) continue;
-    if(ticks.some(o=>Math.hypot(o.x-t.x,o.y-t.y)<3)) continue;
-    ticks.push({x:t.x, y:t.y, nx:t.nx, ny:t.ny});
-    if(ticks.length>=40) break;
+    const dx=c.dx, dy=c.dy;
+    if(dx*t.nx+dy*t.ny<0.15) continue;                    // runs along or into the edge: nothing to extend
+    if(ticks.some(o=>Math.hypot(o.x-t.x,o.y-t.y)<3 && o.dx*dx+o.dy*dy>0.9)) continue;   // same line twice
+    ticks.push({x:t.x, y:t.y, dx, dy});
+    if(ticks.length>=60) break;
   }
   return ticks;
 }
-/* tick as a segment in page mm, crossing the outline */
+/* extension as a segment in page mm: along the line, through the cut line */
 function tickSegment(p, t){
-  const L=+$('tickLen').value;
-  return [[t.x-t.nx*L, t.y-t.ny*L], [t.x+t.nx*L, t.y+t.ny*L]];
+  const dx=t.dx!==undefined?t.dx:t.nx, dy=t.dy!==undefined?t.dy:t.ny;     // older saves stored a normal
+  const out=+$('tickOut').value, inn=+$('tickIn').value;
+  return [[t.x-dx*inn, t.y-dy*inn], [t.x+dx*out, t.y+dy*out]];
 }
 const ticksOn = () => $('tickOn').checked;
-const L0 = () => ticksOn() ? +$('tickLen').value : 0;   // margin needed around a piece for its ticks
+const L0 = () => ticksOn() ? +$('tickOut').value : 0;   // margin needed around a piece for its extensions
 
 const norm90 = d => ((d+90)%180+180)%180-90;
 
@@ -1356,7 +1381,7 @@ function refreshPieceUI(){
   scheduleAutosave();
 }
 ['bedX','bedY','autoRot'].forEach(id=>$(id).addEventListener('change',refreshPieceUI));
-['tickOn','tickLen'].forEach(id=>$(id).addEventListener('change',draw));
+['tickOn','tickOut','tickIn'].forEach(id=>$(id).addEventListener('change',draw));
 $('alignGrain').addEventListener('change',()=>{ S.pieces.forEach(p=>p._al=null); refreshPieceUI(); });
 $('bedPreset').addEventListener('change', e=>{
   if(e.target.value==='custom') return;
@@ -1754,7 +1779,7 @@ $('btnOCR').addEventListener('click', async ()=>{
 /* ---------------- project save / load / autosave ---------------- */
 const PROJECT_FORMAT='pattern2gcode-project', PROJECT_VERSION=1;
 const SETTING_IDS=['dpiSel','thr','minPiece','gapClose','bedPreset','bedX','bedY','lineW','layerH',
-  'nLayers','zOff','speed','travel','flow','filD','tNoz','tBed','retr','alignGrain','pack','gap','autoRot','tickOn','tickLen'];
+  'nLayers','zOff','speed','travel','flow','filD','tNoz','tBed','retr','alignGrain','pack','gap','autoRot','tickOn','tickOut','tickIn'];
 const AUTOSAVE_KEY=h=>'p2g:'+h;
 
 async function hashBytes(buf){
@@ -1777,7 +1802,7 @@ function serializeProject(){
       page:p.page, name:p.name, on:p.on, label:p.label||null, nameUnsure:!!p.nameUnsure, nameMissing:!!p.nameMissing,
       poly:p.poly.map(([x,y])=>[r2(x),r2(y)]),
       poly0:p.poly0.map(([x,y])=>[r2(x),r2(y)]),
-      ticks:(p.ticks||[]).map(t=>({x:r2(t.x),y:r2(t.y),nx:+t.nx.toFixed(4),ny:+t.ny.toFixed(4)})),
+      ticks:(p.ticks||[]).map(t=>({x:r2(t.x),y:r2(t.y),dx:+(t.dx??t.nx).toFixed(4),dy:+(t.dy??t.ny).toFixed(4)})),
       grain:p.grain ? {x1:r2(p.grain.x1),y1:r2(p.grain.y1),x2:r2(p.grain.x2),y2:r2(p.grain.y2),
                        angle:r2(p.grain.angle),len:r2(p.grain.len),manual:!!p.grain.manual,confirmed:!!(p.grain.confirmed||p.grain.manual)} : null,
     })),
