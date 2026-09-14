@@ -816,18 +816,6 @@ function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly, j
         len=t1-t0;
       }
     }
-    // grain arrows float free inside the piece; hem/seam lines run to the outline
-    const e1x=(minx+mx+t0*ux)*mmPerPx, e1y=(miny+my+t0*uy)*mmPerPx;
-    const e2x=(minx+mx+t1*ux)*mmPerPx, e2y=(miny+my+t1*uy)*mmPerPx;
-    if(distToPoly(e1x,e1y)<3.5 || distToPoly(e2x,e2y)<3.5) return null;
-    // a line whose extension passes through a junction just beyond an end is
-    // the edge of a box or seam frame meeting the outline, not an arrow
-    for(const [jx,jy] of jpx){
-      const t=(jx-mx)*ux+(jy-my)*uy, v=Math.abs(-(jx-mx)*uy+(jy-my)*ux);
-      if(v<=2.5 && t>t0-6 && t<t1+6) return null;
-    }
-    { const d1=distToPoly(e1x,e1y), d2=distToPoly(e2x,e2y), dm=distToPoly((e1x+e2x)/2,(e1y+e2y)/2);
-      if(Math.max(d1,d2,dm)-Math.min(d1,d2,dm)<2 && dm<25) return null; }   // parallel to the edge: a seam line
     // an arrowhead: pixels near an end spread well beyond the shaft's width.
     let barb=false;
     {
@@ -839,7 +827,7 @@ function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly, j
         else if(f>0.88) ends[1].push([t,v]);
       }
       mid.sort((a,b)=>a-b);
-      const shaft=mid.length? mid[Math.floor(mid.length*0.9)] : 1;      // 90th percentile half-width
+      const shaft=mid.length? Math.max(0.5, mid[Math.floor(mid.length*0.6)]) : 1;   // robust half-width (a line crossing the shaft must not inflate it)
       const need=Math.max(2.5*shaft, 1.2/mmPerPx);
       // a barb runs diagonally back from the tip, so its lateral spread comes
       // with a comparable spread along the shaft; a line crossing the end
@@ -849,9 +837,24 @@ function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly, j
         if(off.length<4) continue;
         const vMax=Math.max(...off.map(o=>o[1])); if(vMax<=need) continue;
         const ts=off.map(o=>o[0]), tSpread=Math.max(...ts)-Math.min(...ts);
-        if(tSpread>=Math.max(3, 0.4*vMax)) barb=true;
+        if(tSpread>=Math.max(2, 0.3*vMax)) barb=true;      // a crossing line spreads ~1 px; even a flat barb spreads more
       }
     }
+    // grain arrows float free inside the piece; hem/seam lines run to the
+    // outline. A line with an arrowhead is unambiguous, so it only needs to
+    // stay clear of the outline by 1.5 mm; a plain line needs 3.5 mm
+    const e1x=(minx+mx+t0*ux)*mmPerPx, e1y=(miny+my+t0*uy)*mmPerPx;
+    const e2x=(minx+mx+t1*ux)*mmPerPx, e2y=(miny+my+t1*uy)*mmPerPx;
+    const clear=barb?1.5:3.5;
+    if(distToPoly(e1x,e1y)<clear || distToPoly(e2x,e2y)<clear) return null;
+    // a line whose extension passes through a junction just beyond an end is
+    // the edge of a box or seam frame meeting the outline, not an arrow
+    for(const [jx,jy] of jpx){
+      const t=(jx-mx)*ux+(jy-my)*uy, v=Math.abs(-(jx-mx)*uy+(jy-my)*ux);
+      if(v<=2.5 && t>t0-6 && t<t1+6) return null;
+    }
+    { const d1=distToPoly(e1x,e1y), d2=distToPoly(e2x,e2y), dm=distToPoly((e1x+e2x)/2,(e1y+e2y)/2);
+      if(Math.max(d1,d2,dm)-Math.min(d1,d2,dm)<2 && dm<25) return null; }   // parallel to the edge: a seam line
     if(!barb && len<minLenPx) return null;        // short and no arrowhead: not a grain line
     return {len, score:len+(barb?1e6:0), x1:e1x, y1:e1y, x2:e2x, y2:e2y};
   };
@@ -912,8 +915,11 @@ function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly, j
       if(x>0)t(i-1); if(x<bw-1)t(i+1); if(y>0)t(i-bw); if(y<bh-1)t(i+bw);
     }
     const r=evalLine(px);
-    if(r && r.reject==='aspect'){ for(const seg of houghLines(px)) consider(evalLine(seg)); }
-    else consider(r);
+    consider(r);
+    // an arrow crossing or touching another line can still pass as one
+    // slightly-tilted "line" — so every sizeable component is also searched
+    // for straight runs, and a run with an arrowhead beats the whole
+    if(px.length>=200) for(const seg of houghLines(px)) consider(evalLine(seg));
   }
   if(!best) return null;
   let ang=Math.atan2(best.y2-best.y1, best.x2-best.x1)*180/Math.PI;
