@@ -492,6 +492,7 @@ function detectPieces(imgData, mmPerPx, thr, minPieceMM, gapMM){
   // 3. remaining pixels (ink + enclosed interior) form filled piece blobs
   const minPx = (minPieceMM/mmPerPx);
   const pieces=[]; let nextId=1;
+  const comp = new Int32Array(n);                  // real-ink core ids, for splitting merged blobs
   for(let s=0;s<n;s++){
     if(lbl[s]) continue;
     const id=nextId++; let head=0, tail=0;
@@ -507,25 +508,79 @@ function detectPieces(imgData, mmPerPx, thr, minPieceMM, gapMM){
     const bw=maxx-minx+1, bh=maxy-miny+1;
     if(Math.min(bw,bh) < minPx || count < minPx*minPx*0.15) continue;   // too small
     if(bw>=w-2 && bh>=h-2) continue;                                     // page frame
-    // 4. shrink the blob back by r px (undo the thickening), then trace its
-    //    outer boundary (Moore neighbour tracing). Shed pixels become -2 so
-    //    they count as neither piece nor background.
+    // 4. shrink the blob back by r px (undo the thickening). Shed pixels
+    //    become -2 so they count as neither piece nor background.
     erodeBlob(lbl, w, h, id, minx, miny, maxx, maxy, r);
-    const contour = traceBoundary(lbl, w, h, id, minx, miny, maxx, maxy, traceOK);
-    if(contour.length < 8) continue;
-    // 5. simplify (~0.3 mm) and convert to mm
-    // simplify: just over one pixel, so single-pixel jitter goes but every real corner stays
-    const simp = rdp(contour, Math.max(0.3, 1.2*mmPerPx)/mmPerPx).map(p=>[p[0]*mmPerPx, p[1]*mmPerPx]);
-    const poly = simp;
-    const xs=poly.map(p=>p[0]), ys=poly.map(p=>p[1]);
-    const bb={minX:Math.min(...xs), maxX:Math.max(...xs),
-              minY:Math.min(...ys), maxY:Math.max(...ys)};
-    bb.w=bb.maxX-bb.minX; bb.h=bb.maxY-bb.minY;
-    const grain = findGrain(lbl, dark, w, h, id, minx, miny, maxx, maxy, mmPerPx, poly);
-    const ticks = findJunctions(lbl, dark, w, h, id, minx, miny, maxx, maxy, mmPerPx, poly);
-    anchorTicksToVertices(poly, ticks);
-    pieces.push({id, name:'piece-'+pieces.length, poly, poly0:poly.map(q=>q.slice()), bb, grain,
-                 ticks, ticks0:ticks.map(t=>({...t})), on:true});
+    // 4b. Two pieces drawn less than the closing distance apart end up in one
+    //     blob, bridged only by thickened (non-ink) pixels. Split the blob into
+    //     its real-ink cores (8-connected over traceOK pixels); each core big
+    //     enough to be a piece gets its own id, and every other blob pixel —
+    //     bridges, halos, small marks — joins the nearest core.
+    const cores=[];
+    for(let y=miny;y<=maxy;y++)for(let x=minx;x<=maxx;x++){
+      const s0=y*w+x; if(lbl[s0]!==id || !traceOK[s0] || comp[s0]) continue;
+      const cid=cores.length+1; let hd=0, tl=0; q[tl++]=s0; comp[s0]=cid;
+      let cminx=w,cmaxx=0,cminy=h,cmaxy=0,cc=0,touchesBg=false;
+      while(hd<tl){
+        const i=q[hd++], xx=i%w, yy=(i-xx)/w; cc++;
+        if(xx<cminx)cminx=xx; if(xx>cmaxx)cmaxx=xx; if(yy<cminy)cminy=yy; if(yy>cmaxy)cmaxy=yy;
+        for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+          if(!dx&&!dy) continue; const nx=xx+dx, ny=yy+dy; if(nx<0||ny<0||nx>=w||ny>=h) continue;
+          const j=ny*w+nx;
+          if(lbl[j]<0) touchesBg=true;                     // an outline: borders the page background
+          else if(lbl[j]===id && traceOK[j] && !comp[j]){ comp[j]=cid; q[tl++]=j; }
+        }
+      }
+      cores.push({cid, cminx,cmaxx,cminy,cmaxy,cc,touchesBg, start:s0});   // s0 = its top-left-most pixel
+    }
+    // a piece core is one that borders the background; regions walled off
+    // inside a piece by a seam-line ring never do, so they stay part of it
+    // (an outline core is a thin ring — its own inner halo separates it from
+    // the white interior — so judge it by extent, not pixel count)
+    let big=cores.filter(c=>c.touchesBg && Math.min(c.cmaxx-c.cminx+1,c.cmaxy-c.cminy+1)>=minPx);
+    if(!big.length){ const largest=cores.reduce((a,b)=>b.cc>a.cc?b:a, cores[0]); big=largest?[largest]:[]; }
+    if(!big.length) continue;
+    const parts=[];                                       // {pid, minx,miny,maxx,maxy}
+    if(big.length===1){
+      parts.push({pid:id, minx,miny,maxx,maxy, start:big[0].start});
+    }else{
+      // relabel: each big core gets a fresh id, then a multi-source flood hands
+      // the remaining blob pixels to whichever core reaches them first
+      let hd=0, tl=0;
+      for(const c of big){
+        c.pid=nextId++;
+        for(let y=c.cminy;y<=c.cmaxy;y++)for(let x=c.cminx;x<=c.cmaxx;x++){
+          const i=y*w+x; if(comp[i]===c.cid){ lbl[i]=c.pid; q[tl++]=i; }
+        }
+        parts.push({pid:c.pid, minx:c.cminx,miny:c.cminy,maxx:c.cmaxx,maxy:c.cmaxy, start:c.start});
+      }
+      const box={}; for(const pt of parts) box[pt.pid]=pt;
+      while(hd<tl){
+        const i=q[hd++], x=i%w, y=(i-x)/w, pid=lbl[i], b=box[pid];
+        const claim=j=>{ if(lbl[j]===id){ lbl[j]=pid; q[tl++]=j;
+          const jx=j%w, jy=(j-jx)/w; if(jx<b.minx)b.minx=jx; if(jx>b.maxx)b.maxx=jx; if(jy<b.miny)b.miny=jy; if(jy>b.maxy)b.maxy=jy; } };
+        if(x>0) claim(i-1); if(x<w-1) claim(i+1); if(y>0) claim(i-w); if(y<h-1) claim(i+w);
+      }
+    }
+    for(const pt of parts){
+      // 5. trace the outer boundary along real ink (Moore neighbour tracing)
+      // start on the outline ring itself: the traceable region is split into ring,
+      // interior and stray ink runs by the halos, and the trace follows whichever
+      // component it starts in
+      const contour = traceBoundary(lbl, w, h, pt.pid, pt.minx, pt.miny, pt.maxx, pt.maxy, traceOK, pt.start);
+      if(contour.length < 8) continue;
+      // 6. simplify: just over one pixel, so single-pixel jitter goes but every real corner stays
+      const poly = rdp(contour, Math.max(0.3, 1.2*mmPerPx)/mmPerPx).map(p=>[p[0]*mmPerPx, p[1]*mmPerPx]);
+      const xs=poly.map(p=>p[0]), ys=poly.map(p=>p[1]);
+      const bb={minX:Math.min(...xs), maxX:Math.max(...xs),
+                minY:Math.min(...ys), maxY:Math.max(...ys)};
+      bb.w=bb.maxX-bb.minX; bb.h=bb.maxY-bb.minY;
+      const grain = findGrain(lbl, dark, w, h, pt.pid, pt.minx, pt.miny, pt.maxx, pt.maxy, mmPerPx, poly);
+      const ticks = findJunctions(lbl, dark, w, h, pt.pid, pt.minx, pt.miny, pt.maxx, pt.maxy, mmPerPx, poly);
+      anchorTicksToVertices(poly, ticks);
+      pieces.push({id:pt.pid, name:'piece-'+pieces.length, poly, poly0:poly.map(q=>q.slice()), bb, grain,
+                   ticks, ticks0:ticks.map(t=>({...t})), on:true});
+    }
   }
   // stable reading order: top-to-bottom, left-to-right
   pieces.sort((a,b)=> (a.bb.minY-b.bb.minY) || (a.bb.minX-b.bb.minX));
@@ -570,13 +625,17 @@ function erodeBlob(lbl, w, h, id, minx, miny, maxx, maxy, r){
   }
 }
 
-function traceBoundary(lbl, w, h, id, minx, miny, maxx, maxy, ok){
+function traceBoundary(lbl, w, h, id, minx, miny, maxx, maxy, ok, start){
   const isIn = ok ? (i=>lbl[i]===id && ok[i]) : (i=>lbl[i]===id);
-  // find start: topmost row of blob, leftmost pixel
+  // start: a given pixel (top-left-most of the outline ring), else the
+  // topmost row of the blob, leftmost pixel
   let sx=-1, sy=-1;
-  outer:
-  for(let y=miny;y<=maxy;y++) for(let x=minx;x<=maxx;x++)
-    if(isIn(y*w+x)){ sx=x; sy=y; break outer; }
+  if(start!==undefined && isIn(start)){ sx=start%w; sy=(start-sx)/w; }
+  else{
+    outer:
+    for(let y=miny;y<=maxy;y++) for(let x=minx;x<=maxx;x++)
+      if(isIn(y*w+x)){ sx=x; sy=y; break outer; }
+  }
   if(sx<0) return [];
   const inBlob=(x,y)=> x>=0&&x<w&&y>=0&&y<h&&isIn(y*w+x);
   // 8-neighbourhood, clockwise from W
@@ -650,6 +709,29 @@ function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly){
     const li=y*bw+x, gi=(miny+y)*W+(minx+x);
     if(dark[gi] && lbl[gi]===id && !nearBg[li]) ink[li]=1;
   }
+  // Seam lines run parallel to the outline at one constant offset (the
+  // allowance). Their fragments look exactly like a free straight line, and
+  // the grain arrow often touches them. Find that offset as a peak in the
+  // ink-to-outline distance histogram and erase the band before searching.
+  {
+    const bins=new Float64Array(80);                                 // 0.5 mm bins to 40 mm
+    let total=0;
+    for(let y=0;y<bh;y+=2)for(let x=0;x<bw;x+=2){
+      const li=y*bw+x; if(!ink[li]) continue;
+      const d=distToPoly((minx+x)*mmPerPx,(miny+y)*mmPerPx); total++;
+      const b=Math.min(79,Math.floor(d/0.5)); bins[b]++;
+    }
+    let pk=-1, pv=0;
+    for(let b=6;b<79;b++){ const v=bins[b-1]+bins[b]+bins[b+1]; if(v>pv){pv=v; pk=b;} }   // ≥3 mm in
+    if(pk>0 && pv>=0.25*total){
+      const dPeak=(pk+0.5)*0.5;
+      for(let y=0;y<bh;y++)for(let x=0;x<bw;x++){
+        const li=y*bw+x; if(!ink[li]) continue;
+        const d=distToPoly((minx+x)*mmPerPx,(miny+y)*mmPerPx);
+        if(Math.abs(d-dPeak)<1.6) ink[li]=0;
+      }
+    }
+  }
   // connected components of interior ink; PCA each; keep thin, long ones
   const seen=new Uint8Array(n), q=new Int32Array(n);
   const minLenPx=25/mmPerPx;                 // grain arrow at least 25 mm
@@ -699,8 +781,28 @@ function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly){
     const e1x=(minx+mx+t0*ux)*mmPerPx, e1y=(miny+my+t0*uy)*mmPerPx;
     const e2x=(minx+mx+t1*ux)*mmPerPx, e2y=(miny+my+t1*uy)*mmPerPx;
     if(distToPoly(e1x,e1y)<3.5 || distToPoly(e2x,e2y)<3.5) continue;
-    if(!best || len>best.len){
-      best={len, x1:e1x, y1:e1y, x2:e2x, y2:e2y};
+    { const d1=distToPoly(e1x,e1y), d2=distToPoly(e2x,e2y), dm=distToPoly((e1x+e2x)/2,(e1y+e2y)/2);
+      if(Math.max(d1,d2,dm)-Math.min(d1,d2,dm)<2 && dm<25) continue; }   // parallel to the edge: a seam line
+    // an arrowhead: pixels near an end spread well beyond the shaft's width.
+    // A line with one always beats a longer plain line (seam-line fragment,
+    // placement box edge).
+    let barb=false;
+    {
+      const vx=-uy, vy=ux, mid=[], endS=[0,0];
+      for(const [x,y] of px){
+        const t=(x-mx)*ux+(y-my)*uy, v=Math.abs((x-mx)*vx+(y-my)*vy), f=(t-t0)/len;
+        if(f>0.25&&f<0.75) mid.push(v);
+        else if(f<0.12) endS[0]=Math.max(endS[0],v);
+        else if(f>0.88) endS[1]=Math.max(endS[1],v);
+      }
+      mid.sort((a,b)=>a-b);
+      const shaft=mid.length? mid[Math.floor(mid.length*0.9)] : 1;      // 90th percentile half-width
+      const need=Math.max(2.5*shaft, 1.2/mmPerPx);
+      barb = endS[0]>need || endS[1]>need;
+    }
+    const score=len+(barb?1e6:0);
+    if(!best || score>best.score){
+      best={len, score, x1:e1x, y1:e1y, x2:e2x, y2:e2y};
     }
   }
   if(!best) return null;
@@ -925,7 +1027,7 @@ function bedLayout(){
   const kept=S.pieces.filter(p=>p.on);
   const bedX=+$('bedX').value, bedY=+$('bedY').value;
   let sheets;
-  if($('pack').checked) sheets=packSheets(kept, bedX, bedY, +$('gap').value+L0(), 5+L0());
+  if($('pack').checked) sheets=packSheets(kept, bedX, bedY, +$('gap').value+L0());
   else sheets=kept.filter(p=>fitInfo(p).ok).map(p=>{ const f=fitInfo(p);
     return {items:[{p, x:(bedX-f.w)/2, y:(bedY-f.h)/2, rot:f.rot}]}; });
   const skipped=kept.filter(p=>!fitInfo(p).ok);
@@ -963,7 +1065,7 @@ function drawBeds(){
       ctx.fillStyle = it.rot ? 'rgba(179,64,47,.18)' : (sel ? 'rgba(57,83,107,.25)' : 'rgba(179,64,47,.10)');
       ctx.fill();
       ctx.strokeStyle = sel ? '#39536B' : (it.rot ? '#B3402F' : '#26221C'); ctx.lineWidth = sel ? 2.5 : 1.2; ctx.stroke();
-      const tks=placedTicks(it);
+      const tks=placedTicks(it).filter(seg=>seg.every(([x,y])=>x>=0&&x<=L.bedX&&y>=0&&y<=L.bedY));
       if(tks.length){ ctx.strokeStyle='#39536B'; ctx.lineWidth=1.2; ctx.beginPath();
         for(const [[x1,y1],[x2,y2]] of tks){ ctx.moveTo((x1+ox)*k,(y1+oy)*k); ctx.lineTo((x2+ox)*k,(y2+oy)*k); }
         ctx.stroke(); }
@@ -1095,7 +1197,18 @@ function draw(){
       i?ctx.lineTo(x,y):ctx.moveTo(x,y);
     }
     ctx.closePath();
-    if(p.on){
+    const tooBig = p.on && !fitInfo(p).ok;
+    if(tooBig){                                  // won't fit the bed: hatched, grey outline
+      ctx.fillStyle='rgba(38,34,28,.06)'; ctx.fill();
+      ctx.save(); ctx.clip();
+      ctx.strokeStyle='rgba(179,64,47,.35)'; ctx.lineWidth=1; ctx.beginPath();
+      const step=6*pxPerMM, x0=p.bb.minX*pxPerMM, y0=p.bb.minY*pxPerMM, W=p.bb.w*pxPerMM, H=p.bb.h*pxPerMM;
+      for(let t=-H; t<W; t+=step){ ctx.moveTo(x0+t, y0); ctx.lineTo(x0+t+H, y0+H); }
+      ctx.stroke(); ctx.restore();
+      ctx.beginPath();
+      p.poly.forEach(([x,y],i)=> i?ctx.lineTo(x*pxPerMM,y*pxPerMM):ctx.moveTo(x*pxPerMM,y*pxPerMM)); ctx.closePath();
+      ctx.strokeStyle='#8a7f6d'; ctx.setLineDash([7,5]); ctx.lineWidth=2.4;
+    }else if(p.on){
       ctx.fillStyle='rgba(179,64,47,.10)'; ctx.fill();
       ctx.strokeStyle='#B3402F'; ctx.setLineDash([7,5]); ctx.lineWidth=2.4;
     }else{
@@ -1167,12 +1280,12 @@ function draw(){
     // name tag
     const tx=(p.bb.minX)*pxPerMM+4, ty=(p.bb.minY)*pxPerMM+14;
     ctx.font='600 12px system-ui'; 
-    ctx.fillStyle=p.on?'#B3402F':'#a49c8d';
-    ctx.fillText(p.name, tx, ty);
+    ctx.fillStyle=tooBig?'#8a7f6d':(p.on?'#B3402F':'#a49c8d');
+    ctx.fillText(p.name+(tooBig?' · too big for bed':''), tx, ty);
   }
   $('canvasHint').textContent = S.pieces.length
     ? (S.sel ? (handlesVisible(S.sel, pxPerMM)?'Editing '+S.sel.name+' · tap elsewhere to deselect':'Zoom in to edit '+S.sel.name+"'s points")
-             : 'Tap a piece to select it · drag to pan')
+             : 'Tap a piece to select it · drag to pan'+(S.pieces.some(p=>p.on&&p.page===S.pageNum&&!fitInfo(p).ok)?' · hatched = too big for the bed':''))
     : (S.pdf?'Drag to pan · detect pieces when ready':'Load a PDF to begin');
 }
 
@@ -1485,7 +1598,7 @@ function refreshPieceUI(){
   const any=S.pieces.some(p=>p.on);
   $('btnSVG').disabled=$('btnGcode').disabled=$('btnBeds').disabled=$('viewBeds').disabled=!any;
   if(!any && S.view==='beds') setView('page');
-  if(S.view==='beds' && S.imgCanvas) draw();               // packing settings may have changed
+  if(S.imgCanvas) draw();                                  // bed/packing settings may have changed
   scheduleAutosave();
 }
 ['bedX','bedY','autoRot'].forEach(id=>$(id).addEventListener('change',refreshPieceUI));
@@ -1565,7 +1678,7 @@ $('btnSVG').addEventListener('click', ()=>{
   let i=0;
   if($('pack').checked){
     const bedX=+$('bedX').value, bedY=+$('bedY').value;
-    const sheets=packSheets(kept, bedX, bedY, +$('gap').value+L0(), 5+L0());
+    const sheets=packSheets(kept, bedX, bedY, +$('gap').value+L0());
     for(let s=0;s<sheets.length;s++){
       let body='  <rect x="0" y="0" width="'+bedX+'" height="'+bedY
         +'" fill="none" stroke="#999" stroke-width="0.3" stroke-dasharray="3 3"/>\n';
@@ -1573,7 +1686,7 @@ $('btnSVG').addEventListener('click', ()=>{
         const pts=placedPoly(it);
         body+='  <path d="M '+pts.map(q=>fmt(q[0],2)+' '+fmt(q[1],2)).join(' L ')
           +' Z" fill="none" stroke="black" stroke-width="0.4"/>\n';
-        for(const [[x1,y1],[x2,y2]] of placedTicks(it))
+        for(const [[x1,y1],[x2,y2]] of placedTicks(it).filter(seg=>seg.every(([x,y])=>x>=0&&x<=bedX&&y>=0&&y<=bedY)))
           body+='  <path d="M '+fmt(x1,2)+' '+fmt(y1,2)+' L '+fmt(x2,2)+' '+fmt(y2,2)+'" stroke="#39536B" stroke-width="0.4"/>\n';
         body+='  <text x="'+fmt(it.x+3,1)+'" y="'+fmt(it.y+8,1)
           +'" font-size="6" fill="#B3402F">'+it.p.name+(it.rot?' (rot 90°)':'')+'</text>\n';
@@ -1607,7 +1720,7 @@ $('btnGcode').addEventListener('click', ()=>{
   const skipped=kept.filter(p=>!fitInfo(p).ok).length;
   let i=0;
   if($('pack').checked){
-    const sheets=packSheets(kept, +$('bedX').value, +$('bedY').value, +$('gap').value+L0(), 5+L0());
+    const sheets=packSheets(kept, +$('bedX').value, +$('bedY').value, +$('gap').value+L0());
     for(let s=0;s<sheets.length;s++){
       const g=makeSheetGcode(sheets[s], s+1, sheets.length);
       setTimeout(()=>download('sheet-'+(s+1)+'.gcode', g, 'text/plain'), i++*350);
