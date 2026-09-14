@@ -979,7 +979,27 @@ function refreshPieceUI(){
     list.innerHTML='<div class="note">No pieces yet.</div>';
     $('btnSVG').disabled=$('btnGcode').disabled=true; return;
   }
-  for(const p of S.pieces){
+  // problems first, then the rest of the kept pieces, dropped ones last;
+  // reading order (page, top-to-bottom) within each group
+  const group=p=>{
+    if(!p.on) return 2;
+    const fit=fitInfo(p);
+    return (!p.grain || !fit.ok || fit.rot) ? 0 : 1;
+  };
+  const ordered=S.pieces.map((p,i)=>({p,i,g:group(p)}))
+    .sort((a,b)=>(a.g-b.g)||(a.i-b.i));
+  const nProblem=ordered.filter(o=>o.g===0).length;
+  if(nProblem) $('pieceCount').textContent += ' · '+nProblem+' need attention';
+  let lastG=-1;
+  const divider=t=>{ const d=document.createElement('div'); d.className='note'; d.style.margin='6px 0 2px';
+    d.style.fontWeight='600'; d.textContent=t; list.appendChild(d); };
+  for(const {p,g} of ordered){
+    if(g!==lastG){
+      lastG=g;
+      if(g===0) divider('Needs attention — '+nProblem);
+      else if(g===1 && nProblem) divider('Ready');
+      else if(g===2) divider('Dropped');
+    }
     const card=document.createElement('div');
     card.className='piece'+(p.on?'':' off')+(S.sel===p?' sel':'');
     card.style.cursor='pointer';
