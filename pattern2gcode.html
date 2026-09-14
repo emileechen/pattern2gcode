@@ -453,17 +453,23 @@ $('btnDetect').addEventListener('click', async ()=>{
 function detectPieces(imgData, mmPerPx, thr, minPieceMM, gapMM){
   const w=imgData.width, h=imgData.height, d=imgData.data, n=w*h;
   // 1. dark-ink mask
-  const dark = new Uint8Array(n);
+  const dark = new Uint8Array(n), inkish = new Uint8Array(n);
   for(let i=0;i<n;i++){
     const p=i*4;
     const g = 0.299*d[p]+0.587*d[p+1]+0.114*d[p+2];
     if (g < thr) dark[i]=1;
+    if (g < 235) inkish[i]=1;                       // any trace of ink, incl. anti-aliased edges
   }
   // 1b. close hairline gaps: thicken ink by r px so anti-aliased breaks in thin
   //     outlines don't let the background leak into a piece. Blobs are shrunk
   //     back by r before tracing, so outlines still land on the drawn line.
   const r = gapMM>0 ? Math.max(1, Math.ceil(gapMM/(2*mmPerPx))) : 0;
   const fat = dilate8(dark, w, h, r);
+  // The thickening decides what is enclosed, but it also fills sharp concave
+  // corners (a notch between two lobes) — so the boundary is traced along the
+  // real ink: pixels that are ink, or were never thickened, never the fill.
+  const traceOK = new Uint8Array(n);
+  for(let i=0;i<n;i++) traceOK[i] = (inkish[i] || !fat[i]) ? 1 : 0;
   // 2. flood background from border across light pixels
   const lbl = new Int32Array(n);                    // 0 unknown, -1 background, >0 piece id
   const q = new Int32Array(n); let qh=0, qt=0;
@@ -497,10 +503,11 @@ function detectPieces(imgData, mmPerPx, thr, minPieceMM, gapMM){
     //    outer boundary (Moore neighbour tracing). Shed pixels become -2 so
     //    they count as neither piece nor background.
     erodeBlob(lbl, w, h, id, minx, miny, maxx, maxy, r);
-    const contour = traceBoundary(lbl, w, h, id, minx, miny, maxx, maxy);
+    const contour = traceBoundary(lbl, w, h, id, minx, miny, maxx, maxy, traceOK);
     if(contour.length < 8) continue;
     // 5. simplify (~0.3 mm) and convert to mm
-    const simp = rdp(contour, 0.3/mmPerPx).map(p=>[p[0]*mmPerPx, p[1]*mmPerPx]);
+    // simplify: just over one pixel, so single-pixel jitter goes but every real corner stays
+    const simp = rdp(contour, Math.max(0.3, 1.2*mmPerPx)/mmPerPx).map(p=>[p[0]*mmPerPx, p[1]*mmPerPx]);
     const poly = simp;
     const xs=poly.map(p=>p[0]), ys=poly.map(p=>p[1]);
     const bb={minX:Math.min(...xs), maxX:Math.max(...xs),
@@ -552,14 +559,15 @@ function erodeBlob(lbl, w, h, id, minx, miny, maxx, maxy, r){
   }
 }
 
-function traceBoundary(lbl, w, h, id, minx, miny, maxx, maxy){
+function traceBoundary(lbl, w, h, id, minx, miny, maxx, maxy, ok){
+  const isIn = ok ? (i=>lbl[i]===id && ok[i]) : (i=>lbl[i]===id);
   // find start: topmost row of blob, leftmost pixel
   let sx=-1, sy=-1;
   outer:
   for(let y=miny;y<=maxy;y++) for(let x=minx;x<=maxx;x++)
-    if(lbl[y*w+x]===id){ sx=x; sy=y; break outer; }
+    if(isIn(y*w+x)){ sx=x; sy=y; break outer; }
   if(sx<0) return [];
-  const inBlob=(x,y)=> x>=0&&x<w&&y>=0&&y<h&&lbl[y*w+x]===id;
+  const inBlob=(x,y)=> x>=0&&x<w&&y>=0&&y<h&&isIn(y*w+x);
   // 8-neighbourhood, clockwise from W
   const dx=[-1,-1,0,1,1,1,0,-1], dy=[0,-1,-1,-1,0,1,1,1];
   const pts=[[sx,sy]];
