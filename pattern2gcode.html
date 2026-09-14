@@ -212,6 +212,8 @@
 
   <section>
     <h2>3 · Pieces <small class="k" id="pieceCount"></small></h2>
+    <button class="act ghost" id="btnOCR" disabled title="Read the label printed inside each kept piece and use it as the piece name">Read piece names (OCR)</button>
+    <div class="note">Reads the label printed inside each piece (e.g. <b>2d</b>) and names the piece after it. Loads the Tesseract OCR engine (~10 MB) from the internet the first time. Pieces you have renamed yourself are left alone.</div>
     <div id="pieceList"><div class="note">No pieces yet.</div></div>
   </section>
 
@@ -865,7 +867,7 @@ $('edReset').onclick=()=>{ const p=S.sel; if(!p) return;
 $('edDone').onclick=()=>selectPiece(null);
 function renamePiece(p){
   const v=prompt('Piece name (used for file names):', p.name);
-  if(v){ p.name=v.trim().replace(/[^\w\- ]+/g,'').replace(/\s+/g,'-')||p.name;
+  if(v){ p.name=v.trim().replace(/[^\w\- ]+/g,'').replace(/\s+/g,'-')||p.name; p.nameUnsure=false;
          if(S.sel===p) selectPiece(p,{frame:false}); else { refreshPieceUI(); draw(); } }
 }
 async function startGrainPick(p){
@@ -992,6 +994,7 @@ function refreshPieceUI(){
   const list=$('pieceList'); list.innerHTML='';
   $('pieceCount').textContent = S.pieces.length
     ? S.pieces.filter(p=>p.on).length+' kept / '+S.pieces.length+' found' : '';
+  $('btnOCR').disabled=!S.pieces.length;
   if(!S.pieces.length){
     list.innerHTML='<div class="note">No pieces yet.</div>';
     $('btnSVG').disabled=$('btnGcode').disabled=true; return;
@@ -1001,7 +1004,7 @@ function refreshPieceUI(){
   const group=p=>{
     if(!p.on) return 2;
     const fit=fitInfo(p);
-    return (!p.grain || !fit.ok || fit.rot) ? 0 : 1;
+    return (!p.grain || !fit.ok || fit.rot || p.nameUnsure) ? 0 : 1;
   };
   const ordered=S.pieces.map((p,i)=>({p,i,g:group(p)}))
     .sort((a,b)=>(a.g-b.g)||(a.i-b.i));
@@ -1034,6 +1037,7 @@ function refreshPieceUI(){
       '<button class="bg">Grain</button>'+
       '<button class="bk">'+(p.on?'Drop':'Keep')+'</button>'+
       '<span class="brk"></span>'+
+      (p.nameUnsure?'<span class="flags bad" title="OCR was not confident — tap the name to check it">name unsure</span>':'')+
       grainTxt+
       (fit.ok ? (fit.rot?'<span class="flags bad">rot 90° — grain broken</span>':'')
               : '<span class="flags bad">too big — skipped</span>');
@@ -1236,6 +1240,181 @@ function makeSheetGcode(sheet, num, total, soloName){
   return G.join('\n');
 }
 
+/* ---------------- piece names via OCR ---------------- */
+const OCR_DPI=150, OCR_SRC='https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/7.0.0/tesseract.min.js';
+let ocrWorker=null;
+async function getOcrWorker(){
+  if(ocrWorker) return ocrWorker;
+  if(typeof Tesseract==='undefined'){
+    setStatus('Loading OCR engine…');
+    await new Promise((res,rej)=>{
+      const sc=document.createElement('script'); sc.src=OCR_SRC;
+      sc.onload=res; sc.onerror=()=>rej(new Error('could not load the OCR engine (offline?)'));
+      document.head.appendChild(sc);
+    });
+  }
+  ocrWorker=await Tesseract.createWorker('eng');
+  await ocrWorker.setParameters({tessedit_pageseg_mode:'7',        // one text line
+    tessedit_char_whitelist:'0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'});
+  return ocrWorker;
+}
+async function renderCanvasAt(num, dpi){
+  const page=await S.pdf.getPage(num);
+  const vp=page.getViewport({scale:dpi/72});
+  const c=document.createElement('canvas'); c.width=Math.round(vp.width); c.height=Math.round(vp.height);
+  await page.render({canvasContext:c.getContext('2d'), viewport:vp}).promise;
+  return {canvas:c, pxPerMM:c.width/(page.getViewport({scale:1}).width/72*25.4)};
+}
+/* glyph-sized ink blobs inside the piece (outline band, grid lines and the
+   grain arrow are all too big), clustered into text lines → tight crops */
+function findLabelCrops(pageCanvas, pxPerMM, p){
+  const x0=Math.max(0,Math.floor(p.bb.minX*pxPerMM)), y0=Math.max(0,Math.floor(p.bb.minY*pxPerMM));
+  const w=Math.min(pageCanvas.width-x0, Math.ceil(p.bb.w*pxPerMM)), h=Math.min(pageCanvas.height-y0, Math.ceil(p.bb.h*pxPerMM));
+  if(w<4||h<4) return [];
+  const d=pageCanvas.getContext('2d').getImageData(x0,y0,w,h).data;
+  // inside-mask: polygon fill minus a 3 mm band along the outline
+  const mc=document.createElement('canvas'); mc.width=w; mc.height=h; const m=mc.getContext('2d');
+  m.fillStyle='#000'; m.beginPath();
+  p.poly.forEach(([x,y],i)=>{ const px=x*pxPerMM-x0, py=y*pxPerMM-y0; i?m.lineTo(px,py):m.moveTo(px,py); });
+  m.closePath(); m.fill(); m.strokeStyle='#fff'; m.lineWidth=6*pxPerMM; m.stroke();
+  const md=m.getImageData(0,0,w,h).data;
+  const n=w*h, dark=new Uint8Array(n);
+  for(let i=0;i<n;i++){
+    if(md[i*4+3]<128 || md[i*4]>127) continue;
+    const g=0.299*d[i*4]+0.587*d[i*4+1]+0.114*d[i*4+2];
+    if(g<140) dark[i]=1;
+  }
+  // connected components → glyph candidates
+  const seen=new Uint8Array(n), q=new Int32Array(n), glyphs=[], glyphPx=new Uint8Array(n);
+  const minH=1.5*pxPerMM, maxH=9*pxPerMM, maxW=9*pxPerMM;
+  for(let s=0;s<n;s++){
+    if(!dark[s]||seen[s]) continue;
+    let hd=0,tl=0; q[tl++]=s; seen[s]=1; let minx=w,maxx=0,miny=h,maxy=0,c=0;
+    while(hd<tl){
+      const i=q[hd++], x=i%w, y=(i-x)/w; c++;
+      if(x<minx)minx=x; if(x>maxx)maxx=x; if(y<miny)miny=y; if(y>maxy)maxy=y;
+      if(x>0&&dark[i-1]&&!seen[i-1]){seen[i-1]=1;q[tl++]=i-1;}
+      if(x<w-1&&dark[i+1]&&!seen[i+1]){seen[i+1]=1;q[tl++]=i+1;}
+      if(y>0&&dark[i-w]&&!seen[i-w]){seen[i-w]=1;q[tl++]=i-w;}
+      if(y<h-1&&dark[i+w]&&!seen[i+w]){seen[i+w]=1;q[tl++]=i+w;}
+    }
+    const gw=maxx-minx+1, gh=maxy-miny+1;
+    if(c<12 || gh<minH || gh>maxH || gw>maxW) continue;
+    if(c > gw*gh*0.85 && gw>3*pxPerMM) continue;                 // solid blob, not a glyph
+    glyphs.push({minx,maxx,miny,maxy,gh});
+    for(let k=0;k<tl;k++) glyphPx[q[k]]=1;
+  }
+  // cluster into lines: overlapping vertical ranges, small horizontal gaps
+  glyphs.sort((a,b)=>a.minx-b.minx);
+  const lines=[];
+  for(const g of glyphs){
+    let home=null;
+    for(const L of lines){
+      const ov=Math.min(L.maxy,g.maxy)-Math.max(L.miny,g.miny);
+      const gap=g.minx-L.maxx;
+      if(ov>0.5*Math.min(L.maxy-L.miny,g.gh) && gap<1.2*Math.max(L.maxy-L.miny,g.gh) && gap>-g.gh){ home=L; break; }
+    }
+    if(home){ home.maxx=Math.max(home.maxx,g.maxx); home.miny=Math.min(home.miny,g.miny); home.maxy=Math.max(home.maxy,g.maxy); home.n++; }
+    else lines.push({minx:g.minx,maxx:g.maxx,miny:g.miny,maxy:g.maxy,n:1});
+  }
+  const pad=Math.round(1.5*pxPerMM), crops=[];
+  for(const L of lines){
+    if(L.n>6 || (L.maxx-L.minx)>40*pxPerMM) continue;
+    const cx0=Math.max(0,L.minx-pad), cy0=Math.max(0,L.miny-pad);
+    const cw=Math.min(w-cx0,L.maxx-L.minx+1+2*pad), ch=Math.min(h-cy0,L.maxy-L.miny+1+2*pad);
+    // anti-aliased grayscale of the glyphs (lines and fill patterns whited out),
+    // contrast-stretched and smoothly upscaled: OCR reads this far better than
+    // a hard-binarised crop
+    const sc=Math.max(2, Math.round(70/(L.maxy-L.miny+1)));
+    const out=new ImageData(cw,ch); const o=out.data;
+    for(let y=0;y<ch;y++)for(let x=0;x<cw;x++){
+      const i=(cy0+y)*w+(cx0+x), j=(y*cw+x)*4;
+      let g=0.299*d[i*4]+0.587*d[i*4+1]+0.114*d[i*4+2];
+      if(dark[i] && !glyphPx[i]) g=255;                          // a line passing through
+      g=Math.max(0,Math.min(255,(g-60)*255/140));                // stretch 60..200 → 0..255
+      o[j]=o[j+1]=o[j+2]=g; o[j+3]=255;
+    }
+    const t=document.createElement('canvas'); t.width=cw; t.height=ch; t.getContext('2d').putImageData(out,0,0);
+    const c=document.createElement('canvas'); c.width=cw*sc; c.height=ch*sc;
+    const cx=c.getContext('2d'); cx.imageSmoothingEnabled=true; cx.imageSmoothingQuality='high';
+    cx.drawImage(t,0,0,c.width,c.height);
+    crops.push({canvas:c, n:L.n, cx:(x0+cx0+cw/2)/pxPerMM, cy:(y0+cy0+ch/2)/pxPerMM});
+  }
+  return crops;
+}
+const DEFAULT_NAME=/^p\d+-piece-\d+(-\d+)?$/;
+const LABEL_RE=/^\d{1,2}[a-z]{0,2}$/;                     // "2d", "12", "14a" — number, optional letter(s)
+/* OCR loves to read 1 as i/l and 0 as o; labels lead with digits, so fix the leading run */
+function normalizeLabel(t){
+  t=t.replace(/\s+/g,'');
+  const m=t.match(/^([0-9ilI|oO]+)([A-Za-z]*)$/); if(!m) return t.toLowerCase();
+  return m[1].replace(/[ilI|]/g,'1').replace(/[oO]/g,'0')+m[2].toLowerCase();
+}
+/* read one crop with two segmentation modes and combine */
+async function readLabel(worker, canvas){
+  const votes={};
+  for(const psm of ['7','8']){
+    await worker.setParameters({tessedit_pageseg_mode:psm});
+    const r=await worker.recognize(canvas);
+    const text=normalizeLabel(r.data.text||''), conf=r.data.confidence||0;
+    if(!LABEL_RE.test(text)) continue;
+    votes[text]=Math.max(votes[text]||0, conf) + (votes[text]?10:0);   // agreement bonus
+  }
+  let best=null;
+  for(const [text,conf] of Object.entries(votes)) if(!best||conf>best.conf) best={text,conf};
+  return best;
+}
+$('btnOCR').addEventListener('click', async ()=>{
+  const targets=S.pieces.filter(p=>p.on);
+  if(!targets.length) return;
+  const btn=$('btnOCR'); btn.disabled=true;
+  const t0=performance.now(); let named=0, unread=[];
+  try{
+    const worker=await getOcrWorker();
+    const pages=[...new Set(targets.map(p=>p.page))].sort((a,b)=>a-b);
+    for(const pg of pages){
+      setStatus('Reading names… rendering page '+pg);
+      const {canvas, pxPerMM}=await renderCanvasAt(pg, OCR_DPI);
+      const here=targets.filter(p=>p.page===pg);
+      for(let k=0;k<here.length;k++){
+        const p=here[k];
+        setStatus('Reading names… page '+pg+', piece '+(k+1)+'/'+here.length+' ('+named+' named so far)');
+        let best=null;
+        for(const crop of findLabelCrops(canvas, pxPerMM, p)){
+          const r=await readLabel(worker, crop.canvas);
+          if(r && r.conf>=35 && (!best || r.conf>best.conf)) best=r;
+        }
+        if(best){
+          p.label=best.text; p.nameUnsure=best.conf<60; named++;
+          if(DEFAULT_NAME.test(p.name)){
+            let nm=best.text, k2=2;
+            while(S.pieces.some(o=>o!==p && o.name===nm)) nm=best.text+'-'+(k2++);
+            p.name=nm;
+          }
+        }else unread.push(p.name);
+        await new Promise(r=>setTimeout(r,0));
+      }
+      canvas.width=canvas.height=0;                          // free the big bitmap
+    }
+    // document-level sanity: if most labels carry a letter, a bare number is
+    // probably a label whose letter was dropped; leading zeros and duplicates
+    // are suspicious too — send those to "needs attention"
+    const read=targets.filter(p=>p.label);
+    const lettered=read.filter(p=>/[a-z]$/.test(p.label)).length;
+    for(const p of read){
+      if(lettered>=0.6*read.length && !/[a-z]$/.test(p.label)) p.nameUnsure=true;
+      if(/^0/.test(p.label)) p.nameUnsure=true;
+      if(/-\d+$/.test(p.name) && p.name.startsWith(p.label)) p.nameUnsure=true;
+    }
+    const unsure=read.filter(p=>p.nameUnsure).length;
+    refreshPieceUI(); draw(); if(S.sel) selectPiece(S.sel,{frame:false});
+    setStatus('Read names for '+named+' of '+targets.length+' pieces in '+fmt((performance.now()-t0)/1000,0)+' s'
+      +(unsure?', '+unsure+' marked "name unsure"':'')
+      +(unread.length?' — no label found in: '+unread.slice(0,6).join(', ')+(unread.length>6?'…':''):'')+'.');
+  }catch(err){ setStatus('Name reading failed: '+err.message); }
+  btn.disabled=!S.pieces.length;
+});
+
 /* ---------------- project save / load / autosave ---------------- */
 const PROJECT_FORMAT='pattern2gcode-project', PROJECT_VERSION=1;
 const SETTING_IDS=['dpiSel','thr','minPiece','gapClose','bedPreset','bedX','bedY','lineW','layerH',
@@ -1259,7 +1438,7 @@ function serializeProject(){
     format:PROJECT_FORMAT, version:PROJECT_VERSION, savedAt:new Date().toISOString(),
     pdf:S.pdfInfo, pagesIncluded:[...S.pageInc].sort((a,b)=>a-b), viewPage:S.pageNum, settings,
     pieces:S.pieces.map(p=>({
-      page:p.page, name:p.name, on:p.on,
+      page:p.page, name:p.name, on:p.on, label:p.label||null, nameUnsure:!!p.nameUnsure,
       poly:p.poly.map(([x,y])=>[r2(x),r2(y)]),
       poly0:p.poly0.map(([x,y])=>[r2(x),r2(y)]),
       grain:p.grain ? {x1:r2(p.grain.x1),y1:r2(p.grain.y1),x2:r2(p.grain.x2),y2:r2(p.grain.y2),
@@ -1278,7 +1457,7 @@ function applyProject(proj, source){
   S.pageInc=new Set(proj.pagesIncluded.filter(n=>n>=1&&n<=S.pdf.numPages));
   [...$('pageToggles').querySelectorAll('input')].forEach((cb,i)=>{ cb.checked=S.pageInc.has(i+1); });
   S.pieces=proj.pieces.map((q,i)=>({
-    id:i+1, page:q.page, name:q.name, on:q.on!==false,
+    id:i+1, page:q.page, name:q.name, on:q.on!==false, label:q.label||null, nameUnsure:!!q.nameUnsure,
     poly:q.poly.map(v=>v.slice()), poly0:(q.poly0||q.poly).map(v=>v.slice()), grain:q.grain||null,
   }));
   S.pieces.forEach(recalcBB);
