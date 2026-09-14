@@ -1,0 +1,3 @@
+# test pattern PDFs are large and commercially licensed — keep them local
+*.pdf
+.DS_Store

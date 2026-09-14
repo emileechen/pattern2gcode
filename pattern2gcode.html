@@ -1,0 +1,964 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pattern2gcode — pattern to fabric G-code</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<style>
+  :root{
+    --paper:#FAF7F2; --ink:#26221C; --muslin:#EFE9DE; --seam:#D8CFBF;
+    --thread:#B3402F; --thread-soft:#E8C9C2; --indigo:#39536B; --ok:#3E6B4F;
+    --r:10px; --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--paper); color:var(--ink);
+    font:15px/1.45 'Avenir Next','Segoe UI',system-ui,sans-serif;
+    display:flex; flex-direction:column;
+  }
+  header{
+    display:flex; align-items:baseline; gap:14px; padding:14px 20px 10px;
+    border-bottom:2px solid var(--ink);
+  }
+  header h1{margin:0; font-size:21px; font-weight:700; letter-spacing:.01em}
+  header h1 em{font-style:normal; color:var(--thread)}
+  header .sub{font-size:13px; color:#6d675d}
+  #shell{flex:1; display:flex; min-height:0}
+  aside{
+    width:340px; overflow-y:auto; padding:14px 16px 40px;
+    border-right:1px solid var(--seam); background:var(--muslin);
+  }
+  main{flex:1; min-width:0; display:flex; flex-direction:column}
+  #canvasWrap{flex:1; overflow:auto; background:#E4DED2; position:relative}
+  #canvasWrap canvas{display:block; margin:16px auto; background:#fff;
+    box-shadow:0 2px 14px rgba(38,34,28,.18); cursor:grab; touch-action:none}
+  #canvasWrap.panning canvas{cursor:grabbing}
+  #canvasBar{display:flex; gap:10px; align-items:center; padding:8px 14px;
+    border-bottom:1px solid var(--seam); background:var(--paper); flex-wrap:wrap}
+  #canvasBar .hint{font-size:13px; color:#6d675d; margin-left:auto}
+  #pageNav{display:flex; align-items:center; gap:6px}
+  #pageNav button{
+    border:1.5px solid var(--ink); background:#fff; border-radius:6px; padding:3px 10px;
+    font:inherit; font-size:14px; font-weight:700; cursor:pointer; line-height:1.2;
+  }
+  #pageNav button:hover:not(:disabled){background:var(--ink); color:var(--paper)}
+  #pageNav button:disabled{opacity:.3; cursor:default}
+  #pageNav .lbl{font:13px var(--mono); min-width:64px; text-align:center}
+
+  section{margin:0 0 22px}
+  section h2{
+    font-size:13.5px; font-weight:700; margin:0 0 10px; padding-bottom:5px;
+    border-bottom:1.5px dashed var(--thread); /* running stitch */
+  }
+  .row{display:flex; align-items:center; justify-content:space-between; gap:10px; margin:7px 0}
+  .row label{font-size:13.5px}
+  .row input[type=number], .row select{
+    width:96px; padding:5px 7px; border:1px solid var(--seam); border-radius:6px;
+    background:#fff; font:inherit; font-size:13.5px;
+  }
+  .row input[type=range]{width:130px; accent-color:var(--thread)}
+  .row input[type=checkbox]{width:17px;height:17px; accent-color:var(--thread)}
+  .note{font-size:12.5px; color:#6d675d; margin:7px 0}
+  button.act{
+    width:100%; padding:10px 12px; margin:8px 0 0; border-radius:var(--r);
+    border:1.5px solid var(--ink); background:var(--ink); color:var(--paper);
+    font:inherit; font-size:14.5px; font-weight:600; cursor:pointer;
+  }
+  button.act:hover:not(:disabled){background:var(--thread); border-color:var(--thread)}
+  button.act:disabled{opacity:.4; cursor:default}
+  button.act.ghost{background:transparent; color:var(--ink)}
+  button.act.ghost:hover:not(:disabled){background:var(--seam); color:var(--ink)}
+  .filewrap{position:relative; margin:4px 0 8px}
+  .filewrap input[type=file]{position:absolute; inset:0; opacity:0; cursor:pointer; width:100%}
+  .filewrap .facade{
+    border:1.5px dashed var(--ink); border-radius:var(--r); padding:14px;
+    text-align:center; font-size:13.5px; background:#fff;
+  }
+  .filewrap .facade b{display:block; font-size:14.5px}
+
+  /* piece cards */
+  #pieceList{display:flex; flex-direction:column; gap:7px}
+  .piece{
+    display:flex; align-items:center; gap:9px; padding:8px 10px; background:#fff;
+    border:1px solid var(--seam); border-left:5px solid var(--thread); border-radius:8px;
+  }
+  .piece.off{border-left-color:#b9b2a5; opacity:.55}
+  .piece .sw{width:13px; height:13px; border-radius:3px; flex:none}
+  .piece .nm{font-weight:600; font-size:13.5px; cursor:pointer; text-decoration:underline dotted}
+  .piece .dim{font:12px var(--mono); color:#6d675d}
+  .piece .flags{font-size:11.5px; color:#fff; background:var(--indigo);
+    border-radius:5px; padding:1px 6px}
+  .piece .flags.bad{background:var(--thread)}
+  .piece .spacer{flex:1}
+  .piece button{
+    border:1px solid var(--seam); background:var(--paper); border-radius:6px;
+    font:12.5px inherit; padding:4px 8px; cursor:pointer;
+  }
+  .piece button:hover{background:var(--seam)}
+  #status{
+    position:sticky; bottom:0; margin:0 -16px -40px; padding:9px 16px;
+    background:var(--ink); color:var(--paper); font-size:13px; min-height:20px;
+  }
+  small.k{font:11.5px var(--mono); color:#6d675d}
+  @media (max-width:780px){
+    #shell{flex-direction:column}
+    aside{width:100%; max-height:none; border-right:0; order:2}
+    main{order:1; min-height:46vh}
+    #canvasWrap{min-height:40vh}
+    header .sub{display:none}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>pattern<em>2</em>gcode</h1>
+  <span class="sub">scanned pattern PDF → review pieces → print outlines on fabric</span>
+</header>
+
+<div id="shell">
+<main>
+  <div id="canvasBar">
+    <div id="pageNav">
+      <button id="pgPrev" disabled title="Previous page (←)">&#9664;</button>
+      <span class="lbl" id="pgLbl">— / —</span>
+      <button id="pgNext" disabled title="Next page (→)">&#9654;</button>
+    </div>
+    <span style="font-size:13.5px;margin-left:8px">Zoom</span>
+    <input type="range" id="zoom" min="30" max="300" value="100" style="width:140px;accent-color:var(--thread)">
+    <span class="hint" id="canvasHint">Load a PDF to begin</span>
+  </div>
+  <div id="canvasWrap"><canvas id="cv" width="900" height="600"></canvas></div>
+</main>
+
+<aside>
+  <section>
+    <h2>1 · Pattern PDF</h2>
+    <div class="filewrap">
+      <input type="file" id="fileInput" accept="application/pdf">
+      <div class="facade"><b>Choose PDF</b>true-scale copyshop file (A0 etc.)</div>
+    </div>
+    <div class="row"><label>View page</label><select id="pageSel" disabled><option>—</option></select></div>
+    <div class="row" style="align-items:flex-start"><label>Include pages</label>
+      <div id="pageToggles" style="display:flex;flex-wrap:wrap;gap:4px 10px;max-width:180px;justify-content:flex-end"></div>
+    </div>
+    <div class="row"><label>Trace detail</label>
+      <select id="dpiSel">
+        <option value="40">Normal · 0.64 mm/px</option>
+        <option value="72" selected>Fine · 0.35 mm/px</option>
+        <option value="100">High · 0.25 mm/px</option>
+      </select>
+    </div>
+    <div class="note" id="pageInfo"></div>
+  </section>
+
+  <section>
+    <h2>2 · Detect pieces</h2>
+    <div class="row"><label>Line threshold</label><input type="number" id="thr" value="200" min="40" max="250" step="5"></div>
+    <div class="row"><label>Min piece size (mm)</label><input type="number" id="minPiece" value="60" min="20" max="400" step="5"></div>
+    <div class="row"><label>Close outline gaps (mm)</label><input type="number" id="gapClose" value="1.0" min="0" max="6" step="0.5"></div>
+    <button class="act" id="btnDetect" disabled>Detect pieces on included pages</button>
+    <div class="note">Every closed outline becomes a piece. Then tap any piece on the canvas to keep or drop it — labels, logos and stray shapes are dropped that way. Tap a name in the list to rename it (names become file names).</div>
+  </section>
+
+  <section>
+    <h2>3 · Pieces <small class="k" id="pieceCount"></small></h2>
+    <div id="pieceList"><div class="note">No pieces yet.</div></div>
+  </section>
+
+  <section>
+    <h2>4 · Printer &amp; fabric</h2>
+    <div class="row"><label>Bed size</label>
+      <select id="bedPreset">
+        <option value="220,220">220 × 220</option>
+        <option value="235,235">235 × 235</option>
+        <option value="250,210">250 × 210</option>
+        <option value="256,256">256 × 256</option>
+        <option value="270,270" selected>270 × 270</option>
+        <option value="300,300">300 × 300</option>
+        <option value="350,350">350 × 350</option>
+        <option value="custom">Custom…</option>
+      </select>
+    </div>
+    <div class="row"><label>Bed width X (mm)</label><input type="number" id="bedX" value="270" min="50" step="5"></div>
+    <div class="row"><label>Bed depth Y (mm)</label><input type="number" id="bedY" value="270" min="50" step="5"></div>
+    <div class="row"><label>Line width (mm)</label><input type="number" id="lineW" value="0.4" step="0.05"></div>
+    <div class="row"><label>Layer height (mm)</label><input type="number" id="layerH" value="0.2" step="0.02"></div>
+    <div class="row"><label>Passes</label><input type="number" id="nLayers" value="1" min="1" max="5"></div>
+    <div class="row"><label>Z offset = fabric (mm)</label><input type="number" id="zOff" value="0.20" step="0.05"></div>
+    <div class="row"><label>Print speed (mm/s)</label><input type="number" id="speed" value="18" min="3" max="80"></div>
+    <div class="row"><label>Travel speed (mm/s)</label><input type="number" id="travel" value="120" min="20" max="300" step="10"></div>
+    <div class="row"><label>Flow multiplier</label><input type="number" id="flow" value="1.10" step="0.05"></div>
+    <div class="row"><label>Filament Ø (mm)</label><input type="number" id="filD" value="1.75" step="0.05"></div>
+    <div class="row"><label>Nozzle temp (°C)</label><input type="number" id="tNoz" value="210" step="5"></div>
+    <div class="row"><label>Bed temp (°C, 0 = off)</label><input type="number" id="tBed" value="0" min="0" max="110" step="5"></div>
+    <div class="row"><label>Retraction (mm)</label><input type="number" id="retr" value="1.0" min="0" max="8" step="0.5"></div>
+    <div class="note"><b>Fabric setup:</b> tape the fabric taut on all four sides, set Z offset ≈ fabric thickness, keep bed heat off or low. No purge line is generated (fabric covers the bed) — extrude a little by hand just before starting so the nozzle is primed.</div>
+  </section>
+
+  <section>
+    <h2>5 · Export</h2>
+    <div class="row"><label>Rotate pieces so grain runs vertical</label><input type="checkbox" id="alignGrain" checked></div>
+    <div class="row"><label>Pack several pieces per bed</label><input type="checkbox" id="pack" checked></div>
+    <div class="row"><label>Spacing between pieces (mm)</label><input type="number" id="gap" value="8" min="2" max="40" step="1"></div>
+    <div class="row"><label>Rotate 90° if needed to fit — <b>breaks grain</b></label><input type="checkbox" id="autoRot"></div>
+    <button class="act ghost" id="btnSVG" disabled>Download SVGs</button>
+    <button class="act" id="btnGcode" disabled>Download G-code</button>
+    <div class="note">Grain arrows are detected inside each piece (blue arrows on the canvas; green if set by hand). Each piece is rotated so its grain runs along the bed's Y axis — lay your fabric with its grain along Y every time. Pieces marked "no grain found" won't be rotated: check them and use the Grain button to tap the arrow's two ends yourself. When packing is on, kept pieces are grouped onto as few beds as possible (one G-code file per bed, plus a matching SVG layout sheet). Pieces larger than the bed are skipped and flagged.</div>
+  </section>
+
+  <div id="status">Ready.</div>
+</aside>
+</div>
+
+<script>
+"use strict";
+if (typeof pdfjsLib !== 'undefined'){
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+}
+
+/* ---------------- state ---------------- */
+const S = {
+  pdf:null, pageNum:1, pageMM:{w:0,h:0},
+  pageInc:new Set(),  // page numbers included in detection/export
+  imgCanvas:null,     // offscreen canvas with the currently viewed page
+  mmPerPx:1,
+  pieces:[],          // {id,page,name,poly:[[mm,mm],...],bb:{...},on:true}
+  zoom:1,
+};
+const $ = id => document.getElementById(id);
+const fmt = (n,d=1)=>Number(n).toFixed(d);
+const gnum = n => { const s = n.toFixed(4); return s.replace(/\.?0+$/,''); };
+const setStatus = t => { $('status').textContent = t; };
+
+/* ---------------- PDF load & render ---------------- */
+$('fileInput').addEventListener('change', async e=>{
+  const f = e.target.files[0]; if(!f) return;
+  setStatus('Reading PDF…');
+  try{
+    const buf = await f.arrayBuffer();
+    S.pdf = await pdfjsLib.getDocument({data:buf}).promise;
+    const sel = $('pageSel'); sel.innerHTML=''; sel.disabled=false;
+    const tog = $('pageToggles'); tog.innerHTML='';
+    S.pageInc = new Set();
+    for(let i=1;i<=S.pdf.numPages;i++){
+      const o=document.createElement('option'); o.value=i; o.textContent='Page '+i;
+      sel.appendChild(o);
+      S.pageInc.add(i);
+      const lb=document.createElement('label');
+      lb.style.cssText='font-size:12.5px;display:flex;gap:3px;align-items:center';
+      const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=true;
+      cb.style.accentColor='var(--thread)';
+      cb.onchange=()=>{ cb.checked?S.pageInc.add(i):S.pageInc.delete(i);
+        setStatus(S.pageInc.size+' of '+S.pdf.numPages+' pages included.'); };
+      lb.appendChild(cb); lb.appendChild(document.createTextNode(i));
+      tog.appendChild(lb);
+    }
+    S.pageNum = 1; S.pieces=[]; refreshPieceUI();
+    await showPage(1);
+    $('btnDetect').disabled = false;
+    setStatus('PDF loaded — '+S.pdf.numPages+' pages, all included. Untick pages to omit them, then detect.');
+  }catch(err){ setStatus('Could not read that PDF: '+err.message); }
+});
+$('pageSel').addEventListener('change', e=>showPage(+e.target.value));
+function stepPage(d){
+  if(!S.pdf) return;
+  const n=S.pageNum+d;
+  if(n>=1 && n<=S.pdf.numPages) showPage(n);
+}
+$('pgPrev').addEventListener('click', ()=>stepPage(-1));
+$('pgNext').addEventListener('click', ()=>stepPage(1));
+document.addEventListener('keydown', e=>{
+  const t=e.target.tagName;
+  if(t==='INPUT'||t==='SELECT'||t==='TEXTAREA') return;   // don't hijack form fields
+  if(e.key==='ArrowLeft'){ e.preventDefault(); stepPage(-1); }
+  else if(e.key==='ArrowRight'){ e.preventDefault(); stepPage(1); }
+});
+$('dpiSel').addEventListener('change', ()=>{ if(S.pdf) showPage(S.pageNum); });
+
+/* render any page at detect dpi; returns {canvas, img, mmPerPx, pageMM} */
+async function renderFor(num){
+  const page = await S.pdf.getPage(num);
+  const v1 = page.getViewport({scale:1});           // 72 pt/inch
+  const pageMM = { w: v1.width/72*25.4, h: v1.height/72*25.4 };
+  const dpi = +$('dpiSel').value;
+  const vp = page.getViewport({scale:dpi/72});
+  const c = document.createElement('canvas');
+  c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+  await page.render({canvasContext:c.getContext('2d'), viewport:vp}).promise;
+  const img = c.getContext('2d').getImageData(0,0,c.width,c.height);
+  return {canvas:c, img, mmPerPx: pageMM.w/c.width, pageMM};
+}
+
+async function showPage(num){
+  setStatus('Rendering page '+num+'…');
+  S.pageNum = num; $('pageSel').value = num;
+  $('pgLbl').textContent = num+' / '+S.pdf.numPages;
+  $('pgPrev').disabled = num<=1;
+  $('pgNext').disabled = num>=S.pdf.numPages;
+  const r = await renderFor(num);
+  S.imgCanvas = r.canvas; S.mmPerPx = r.mmPerPx; S.pageMM = r.pageMM;
+  $('pageInfo').textContent =
+    'Page is '+fmt(S.pageMM.w,0)+' × '+fmt(S.pageMM.h,0)+' mm — scale is exact ('
+    +fmt(S.mmPerPx,3)+' mm/px).';
+  draw();
+  setStatus('Viewing page '+num+'.');
+}
+
+/* ---------------- detection ---------------- */
+$('btnDetect').addEventListener('click', async ()=>{
+  if(!S.pdf) return;
+  const pages=[...S.pageInc].sort((a,b)=>a-b);
+  if(!pages.length){ setStatus('All pages are unticked — include at least one.'); return; }
+  const t0 = performance.now();
+  S.pieces=[];
+  try{
+    for(const pg of pages){
+      setStatus('Detecting… page '+pg+' of ['+pages.join(', ')+']');
+      const r = (pg===S.pageNum && S.imgCanvas)
+        ? {img:S.imgCanvas.getContext('2d').getImageData(0,0,S.imgCanvas.width,S.imgCanvas.height),
+           mmPerPx:S.mmPerPx}
+        : await renderFor(pg);
+      const found = detectPieces(r.img, r.mmPerPx, +$('thr').value, +$('minPiece').value, +$('gapClose').value);
+      for(const p of found){ p.page=pg; p.name='p'+pg+'-'+p.name; }
+      S.pieces.push(...found);
+      await new Promise(res=>setTimeout(res,10));    // keep UI responsive
+    }
+    refreshPieceUI(); draw();
+    setStatus('Found '+S.pieces.length+' pieces across '+pages.length+' page'
+      +(pages.length===1?'':'s')+' in '+fmt((performance.now()-t0)/1000,1)
+      +' s. Tap any piece to keep or drop it.');
+  }catch(err){ setStatus('Detection failed: '+err.message); }
+});
+
+function detectPieces(imgData, mmPerPx, thr, minPieceMM, gapMM){
+  const w=imgData.width, h=imgData.height, d=imgData.data, n=w*h;
+  // 1. dark-ink mask
+  const dark = new Uint8Array(n);
+  for(let i=0;i<n;i++){
+    const p=i*4;
+    const g = 0.299*d[p]+0.587*d[p+1]+0.114*d[p+2];
+    if (g < thr) dark[i]=1;
+  }
+  // 1b. close hairline gaps: thicken ink by r px so anti-aliased breaks in thin
+  //     outlines don't let the background leak into a piece. Blobs are shrunk
+  //     back by r before tracing, so outlines still land on the drawn line.
+  const r = gapMM>0 ? Math.max(1, Math.ceil(gapMM/(2*mmPerPx))) : 0;
+  const fat = dilate8(dark, w, h, r);
+  // 2. flood background from border across light pixels
+  const lbl = new Int32Array(n);                    // 0 unknown, -1 background, >0 piece id
+  const q = new Int32Array(n); let qh=0, qt=0;
+  const pushBg = i => { if(!lbl[i] && !fat[i]){ lbl[i]=-1; q[qt++]=i; } };
+  for(let x=0;x<w;x++){ pushBg(x); pushBg((h-1)*w+x); }
+  for(let y=0;y<h;y++){ pushBg(y*w); pushBg(y*w+w-1); }
+  while(qh<qt){
+    const i=q[qh++], x=i%w, y=(i-x)/w;
+    if(x>0) pushBg(i-1); if(x<w-1) pushBg(i+1);
+    if(y>0) pushBg(i-w); if(y<h-1) pushBg(i+w);
+  }
+  // 3. remaining pixels (ink + enclosed interior) form filled piece blobs
+  const minPx = (minPieceMM/mmPerPx);
+  const pieces=[]; let nextId=1;
+  for(let s=0;s<n;s++){
+    if(lbl[s]) continue;
+    const id=nextId++; let head=0, tail=0;
+    q[tail++]=s; lbl[s]=id;
+    let minx=w,maxx=0,miny=h,maxy=0,count=0;
+    while(head<tail){
+      const i=q[head++], x=i%w, y=(i-x)/w; count++;
+      if(x<minx)minx=x; if(x>maxx)maxx=x; if(y<miny)miny=y; if(y>maxy)maxy=y;
+      const tryPx = j => { if(!lbl[j]){ lbl[j]=id; q[tail++]=j; } };
+      if(x>0) tryPx(i-1); if(x<w-1) tryPx(i+1);
+      if(y>0) tryPx(i-w); if(y<h-1) tryPx(i+w);
+    }
+    const bw=maxx-minx+1, bh=maxy-miny+1;
+    if(Math.min(bw,bh) < minPx || count < minPx*minPx*0.15) continue;   // too small
+    if(bw>=w-2 && bh>=h-2) continue;                                     // page frame
+    // 4. shrink the blob back by r px (undo the thickening), then trace its
+    //    outer boundary (Moore neighbour tracing). Shed pixels become -2 so
+    //    they count as neither piece nor background.
+    erodeBlob(lbl, w, h, id, minx, miny, maxx, maxy, r);
+    const contour = traceBoundary(lbl, w, h, id, minx, miny, maxx, maxy);
+    if(contour.length < 8) continue;
+    // 5. simplify (~0.3 mm) and convert to mm
+    const simp = rdp(contour, 0.3/mmPerPx).map(p=>[p[0]*mmPerPx, p[1]*mmPerPx]);
+    const poly = simp;
+    const xs=poly.map(p=>p[0]), ys=poly.map(p=>p[1]);
+    const bb={minX:Math.min(...xs), maxX:Math.max(...xs),
+              minY:Math.min(...ys), maxY:Math.max(...ys)};
+    bb.w=bb.maxX-bb.minX; bb.h=bb.maxY-bb.minY;
+    const grain = findGrain(lbl, dark, w, h, id, minx, miny, maxx, maxy, mmPerPx, poly);
+    pieces.push({id, name:'piece-'+pieces.length, poly, bb, grain, on:true});
+  }
+  // stable reading order: top-to-bottom, left-to-right
+  pieces.sort((a,b)=> (a.bb.minY-b.bb.minY) || (a.bb.minX-b.bb.minX));
+  pieces.forEach((p,i)=>p.name='piece-'+(i+1));
+  return pieces;
+}
+
+/* 8-neighbour dilation of a binary mask, r passes */
+function dilate8(src, w, h, r){
+  if(r<=0) return src;
+  let a=src, b=new Uint8Array(src.length);
+  for(let pass=0;pass<r;pass++){
+    for(let y=0;y<h;y++){
+      const y0=y>0?y-1:y, y1=y<h-1?y+1:y;
+      for(let x=0;x<w;x++){
+        const i=y*w+x;
+        if(a[i]){ b[i]=1; continue; }
+        const x0=x>0?x-1:x, x1=x<w-1?x+1:x;
+        b[i] = (a[y0*w+x0]|a[y0*w+x]|a[y0*w+x1]|a[y*w+x0]|a[y*w+x1]|a[y1*w+x0]|a[y1*w+x]|a[y1*w+x1]) ? 1 : 0;
+      }
+    }
+    if(pass<r-1){ const t=a; a=b; b=(t===src)?new Uint8Array(src.length):t; }
+    else a=b;
+  }
+  return a;
+}
+/* strip r layers of pixels (8-neighbour) off one labelled blob, in place */
+function erodeBlob(lbl, w, h, id, minx, miny, maxx, maxy, r){
+  for(let pass=0;pass<r;pass++){
+    const shed=[];
+    for(let y=miny;y<=maxy;y++){
+      const y0=y>0?y-1:y, y1=y<h-1?y+1:y;
+      for(let x=minx;x<=maxx;x++){
+        const i=y*w+x; if(lbl[i]!==id) continue;
+        const x0=x>0?x-1:x, x1=x<w-1?x+1:x;
+        if(lbl[y0*w+x0]!==id||lbl[y0*w+x]!==id||lbl[y0*w+x1]!==id||
+           lbl[y*w+x0]!==id||lbl[y*w+x1]!==id||
+           lbl[y1*w+x0]!==id||lbl[y1*w+x]!==id||lbl[y1*w+x1]!==id) shed.push(i);
+      }
+    }
+    for(const i of shed) lbl[i]=-2;
+  }
+}
+
+function traceBoundary(lbl, w, h, id, minx, miny, maxx, maxy){
+  // find start: topmost row of blob, leftmost pixel
+  let sx=-1, sy=-1;
+  outer:
+  for(let y=miny;y<=maxy;y++) for(let x=minx;x<=maxx;x++)
+    if(lbl[y*w+x]===id){ sx=x; sy=y; break outer; }
+  if(sx<0) return [];
+  const inBlob=(x,y)=> x>=0&&x<w&&y>=0&&y<h&&lbl[y*w+x]===id;
+  // 8-neighbourhood, clockwise from W
+  const dx=[-1,-1,0,1,1,1,0,-1], dy=[0,-1,-1,-1,0,1,1,1];
+  const pts=[[sx,sy]];
+  let cx=sx, cy=sy, dir=6;               // came from above -> start search from S-ish
+  const maxSteps=(maxx-minx+maxy-miny+4)*8;
+  for(let step=0; step<maxSteps; step++){
+    let found=-1;
+    for(let k=0;k<8;k++){
+      const nd=(dir+6+k)%8;              // backtrack then clockwise
+      const nx=cx+dx[nd], ny=cy+dy[nd];
+      if(inBlob(nx,ny)){ found=nd; cx=nx; cy=ny; break; }
+    }
+    if(found<0) break;                   // isolated pixel
+    dir=found;
+    if(cx===sx && cy===sy) break;        // closed the loop
+    pts.push([cx,cy]);
+  }
+  return pts;
+}
+
+function rdp(pts, eps){
+  if(pts.length<3) return pts;
+  const keep = new Uint8Array(pts.length); keep[0]=keep[pts.length-1]=1;
+  const stack=[[0,pts.length-1]];
+  while(stack.length){
+    const [a,b]=stack.pop();
+    const [ax,ay]=pts[a], [bx,by]=pts[b];
+    const dx=bx-ax, dy=by-ay, len=Math.hypot(dx,dy)||1e-9;
+    let mi=-1, md=0;
+    for(let i=a+1;i<b;i++){
+      const dist=Math.abs(dy*(pts[i][0]-ax)-dx*(pts[i][1]-ay))/len;
+      if(dist>md){ md=dist; mi=i; }
+    }
+    if(md>eps){ keep[mi]=1; stack.push([a,mi],[mi,b]); }
+  }
+  return pts.filter((_,i)=>keep[i]);
+}
+
+/* ---------------- grain detection ---------------- */
+/* Find the grain arrow: the longest thin straight ink component well inside the piece. */
+function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly){
+  const distToPoly=(x,y)=>{                  // min distance (mm) from point to outline
+    let dmin=1e9;
+    for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+      const [ax,ay]=poly[j], [bx,by]=poly[i];
+      const vx=bx-ax, vy=by-ay, L2=vx*vx+vy*vy||1e-9;
+      let t=((x-ax)*vx+(y-ay)*vy)/L2; t=Math.max(0,Math.min(1,t));
+      const dx=x-(ax+t*vx), dy=y-(ay+t*vy);
+      const d=dx*dx+dy*dy; if(d<dmin)dmin=d;
+    }
+    return Math.sqrt(dmin);
+  };
+  const bw=maxx-minx+1, bh=maxy-miny+1, n=bw*bh;
+  // local masks; nearBg = background dilated 3px, to strip the outline ring
+  const nearBg=new Uint8Array(n), ink=new Uint8Array(n);
+  for(let y=0;y<bh;y++)for(let x=0;x<bw;x++){
+    const gi=(miny+y)*W+(minx+x);
+    if(lbl[gi]<0) nearBg[y*bw+x]=1;              // background or shed shell
+  }
+  for(let pass=0;pass<3;pass++){
+    const prev=nearBg.slice();
+    for(let y=0;y<bh;y++)for(let x=0;x<bw;x++){
+      if(prev[y*bw+x]) continue;
+      if((x>0&&prev[y*bw+x-1])||(x<bw-1&&prev[y*bw+x+1])||
+         (y>0&&prev[(y-1)*bw+x])||(y<bh-1&&prev[(y+1)*bw+x])) nearBg[y*bw+x]=1;
+    }
+  }
+  for(let y=0;y<bh;y++)for(let x=0;x<bw;x++){
+    const li=y*bw+x, gi=(miny+y)*W+(minx+x);
+    if(dark[gi] && lbl[gi]===id && !nearBg[li]) ink[li]=1;
+  }
+  // connected components of interior ink; PCA each; keep thin, long ones
+  const seen=new Uint8Array(n), q=new Int32Array(n);
+  const minLenPx=25/mmPerPx;                 // grain arrow at least 25 mm
+  let best=null;
+  for(let s=0;s<n;s++){
+    if(!ink[s]||seen[s]) continue;
+    let head=0, tail=0; q[tail++]=s; seen[s]=1;
+    let sx=0,sy=0,c=0; const px=[];
+    while(head<tail){
+      const i=q[head++], x=i%bw, y=(i-x)/bw;
+      px.push([x,y]); sx+=x; sy+=y; c++;
+      const t=j=>{ if(ink[j]&&!seen[j]){seen[j]=1;q[tail++]=j;} };
+      if(x>0)t(i-1); if(x<bw-1)t(i+1); if(y>0)t(i-bw); if(y<bh-1)t(i+bw);
+    }
+    if(c<minLenPx*0.7) continue;             // too little ink to be an arrow
+    const mx=sx/c, my=sy/c;
+    let sxx=0,sxy=0,syy=0;
+    for(const [x,y] of px){const dx=x-mx,dy=y-my; sxx+=dx*dx; sxy+=dx*dy; syy+=dy*dy;}
+    sxx/=c; sxy/=c; syy/=c;
+    const tr=(sxx+syy)/2, dt=Math.sqrt(((sxx-syy)/2)**2+sxy*sxy);
+    const l1=tr+dt, l2=Math.max(tr-dt,1e-6);
+    const aspect=Math.sqrt(l1/l2);
+    if(aspect<3.5) continue;                 // rectangles, text, blobs
+    const th=0.5*Math.atan2(2*sxy, sxx-syy);
+    const ux=Math.cos(th), uy=Math.sin(th);
+    let t0=1e9,t1=-1e9;
+    for(const [x,y] of px){const t=(x-mx)*ux+(y-my)*uy; if(t<t0)t0=t; if(t>t1)t1=t;}
+    const len=t1-t0;
+    if(len<minLenPx) continue;
+    // grain arrows float free inside the piece; hem/seam lines run to the outline
+    const e1x=(minx+mx+t0*ux)*mmPerPx, e1y=(miny+my+t0*uy)*mmPerPx;
+    const e2x=(minx+mx+t1*ux)*mmPerPx, e2y=(miny+my+t1*uy)*mmPerPx;
+    if(distToPoly(e1x,e1y)<3.5 || distToPoly(e2x,e2y)<3.5) continue;
+    if(!best || len>best.len){
+      best={len, x1:e1x, y1:e1y, x2:e2x, y2:e2y};
+    }
+  }
+  if(!best) return null;
+  let ang=Math.atan2(best.y2-best.y1, best.x2-best.x1)*180/Math.PI;
+  ang=((ang%180)+180)%180;                   // grain is an axis: 0–180°
+  return {x1:best.x1, y1:best.y1, x2:best.x2, y2:best.y2,
+          angle:ang, len:best.len*mmPerPx, manual:false};
+}
+
+const norm90 = d => ((d+90)%180+180)%180-90;
+
+/* aligned polygon: rotated so grain runs vertical (if enabled and known) */
+function alignDelta(p){
+  return ($('alignGrain').checked && p.grain) ? norm90(90 - p.grain.angle) : 0;
+}
+function alignedPoly(p){
+  const d=alignDelta(p);
+  if(p._al && p._al.d===d) return p._al;
+  let pts=p.poly;
+  if(Math.abs(d)>0.05){
+    const cx=(p.bb.minX+p.bb.maxX)/2, cy=(p.bb.minY+p.bb.maxY)/2;
+    const r=d*Math.PI/180, co=Math.cos(r), si=Math.sin(r);
+    pts=pts.map(([x,y])=>[cx+(x-cx)*co-(y-cy)*si, cy+(x-cx)*si+(y-cy)*co]);
+  }
+  const xs=pts.map(q=>q[0]), ys=pts.map(q=>q[1]);
+  const minX=Math.min(...xs), minY=Math.min(...ys);
+  p._al={d, pts:pts.map(([x,y])=>[x-minX,y-minY]),
+         w:Math.max(...xs)-minX, h:Math.max(...ys)-minY};
+  return p._al;
+}
+
+/* ---------------- canvas & refinement ---------------- */
+$('zoom').addEventListener('input', draw);
+function draw(){
+  const cv=$('cv'); if(!S.imgCanvas){ return; }
+  const z = +$('zoom').value/100 * Math.min(1, 1100/S.imgCanvas.width);
+  S.zoom=z;
+  cv.width = Math.round(S.imgCanvas.width*z);
+  cv.height= Math.round(S.imgCanvas.height*z);
+  const ctx=cv.getContext('2d');
+  ctx.drawImage(S.imgCanvas,0,0,cv.width,cv.height);
+  const pxPerMM = 1/S.mmPerPx*z;
+  for(const p of S.pieces.filter(p=>p.page===S.pageNum)){
+    ctx.beginPath();
+    for(let i=0;i<p.poly.length;i++){
+      const x=p.poly[i][0]*pxPerMM, y=p.poly[i][1]*pxPerMM;
+      i?ctx.lineTo(x,y):ctx.moveTo(x,y);
+    }
+    ctx.closePath();
+    if(p.on){
+      ctx.fillStyle='rgba(179,64,47,.10)'; ctx.fill();
+      ctx.strokeStyle='#B3402F'; ctx.setLineDash([7,5]); ctx.lineWidth=2.4;
+    }else{
+      ctx.strokeStyle='#a49c8d'; ctx.setLineDash([2,5]); ctx.lineWidth=1.4;
+    }
+    ctx.stroke(); ctx.setLineDash([]);
+    // grain arrow
+    if(p.grain){
+      const g=p.grain;
+      ctx.beginPath();
+      ctx.moveTo(g.x1*pxPerMM, g.y1*pxPerMM);
+      ctx.lineTo(g.x2*pxPerMM, g.y2*pxPerMM);
+      ctx.strokeStyle = p.on ? (g.manual?'#3E6B4F':'#39536B') : '#a49c8d';
+      ctx.lineWidth=2.6; ctx.stroke();
+      // arrowheads both ends (grain is an axis)
+      const ang=Math.atan2(g.y2-g.y1, g.x2-g.x1);
+      for(const [ex,ey,a0] of [[g.x2,g.y2,ang],[g.x1,g.y1,ang+Math.PI]]){
+        ctx.beginPath();
+        ctx.moveTo(ex*pxPerMM, ey*pxPerMM);
+        ctx.lineTo(ex*pxPerMM-9*Math.cos(a0-0.4), ey*pxPerMM-9*Math.sin(a0-0.4));
+        ctx.moveTo(ex*pxPerMM, ey*pxPerMM);
+        ctx.lineTo(ex*pxPerMM-9*Math.cos(a0+0.4), ey*pxPerMM-9*Math.sin(a0+0.4));
+        ctx.stroke();
+      }
+    }else if(p.on){
+      ctx.font='700 13px system-ui'; ctx.fillStyle='#B3402F';
+      ctx.fillText('grain?', (p.bb.minX)*pxPerMM+4, (p.bb.minY)*pxPerMM+28);
+    }
+    // pending manual pick marker
+    if(S.grainPick && S.grainPick.piece===p && S.grainPick.pt){
+      ctx.beginPath();
+      ctx.arc(S.grainPick.pt[0]*pxPerMM, S.grainPick.pt[1]*pxPerMM, 5, 0, 7);
+      ctx.fillStyle='#3E6B4F'; ctx.fill();
+    }
+    // name tag
+    const tx=(p.bb.minX)*pxPerMM+4, ty=(p.bb.minY)*pxPerMM+14;
+    ctx.font='600 12px system-ui'; 
+    ctx.fillStyle=p.on?'#B3402F':'#a49c8d';
+    ctx.fillText(p.name, tx, ty);
+  }
+  $('canvasHint').textContent = S.pieces.length
+    ? 'Tap a piece to keep / drop it · drag to pan' : (S.pdf?'Drag to pan · detect pieces when ready':'Load a PDF to begin');
+}
+
+/* drag to pan: pointer down + move scrolls the wrapper; a still click falls
+   through to the keep/drop handler below */
+{
+  const wrap=$('canvasWrap'), cv=$('cv');
+  let pan=null;
+  cv.addEventListener('pointerdown', e=>{
+    if(e.button!==0) return;
+    pan={id:e.pointerId, x:e.clientX, y:e.clientY, sl:wrap.scrollLeft, st:wrap.scrollTop, moved:false};
+    cv.setPointerCapture(e.pointerId);
+  });
+  cv.addEventListener('pointermove', e=>{
+    if(!pan || e.pointerId!==pan.id) return;
+    const dx=e.clientX-pan.x, dy=e.clientY-pan.y;
+    if(!pan.moved && Math.hypot(dx,dy)<4) return;      // small jitter is still a click
+    pan.moved=true; wrap.classList.add('panning');
+    wrap.scrollLeft=pan.sl-dx; wrap.scrollTop=pan.st-dy;
+  });
+  const end=e=>{
+    if(!pan || e.pointerId!==pan.id) return;
+    S.suppressClick=pan.moved; pan=null; wrap.classList.remove('panning');
+  };
+  cv.addEventListener('pointerup', end);
+  cv.addEventListener('pointercancel', end);
+}
+
+$('cv').addEventListener('click', e=>{
+  if(S.suppressClick){ S.suppressClick=false; return; }  // end of a drag, not a tap
+  if(!S.pieces.length) return;
+  const r=$('cv').getBoundingClientRect();
+  const mmX=(e.clientX-r.left)/S.zoom*S.mmPerPx;
+  const mmY=(e.clientY-r.top)/S.zoom*S.mmPerPx;
+  if(S.grainPick){                            // manual grain: two taps along the arrow
+    const gp=S.grainPick;
+    if(!gp.pt){ gp.pt=[mmX,mmY]; draw();
+      setStatus('Now tap the other end of '+gp.piece.name+"'s grain line."); return; }
+    const [x1,y1]=gp.pt;
+    if(Math.hypot(mmX-x1,mmY-y1)<5){ setStatus('Points too close — tap further along the grain line.'); return; }
+    let ang=Math.atan2(mmY-y1, mmX-x1)*180/Math.PI;
+    ang=((ang%180)+180)%180;
+    gp.piece.grain={x1, y1, x2:mmX, y2:mmY, angle:ang,
+                    len:Math.hypot(mmX-x1,mmY-y1), manual:true};
+    gp.piece._al=null;
+    S.grainPick=null;
+    refreshPieceUI(); draw();
+    setStatus(gp.piece.name+' grain set to '+fmt(ang,1)+'° by hand.');
+    return;
+  }
+  // topmost smallest piece containing the point
+  let hit=null;
+  for(const p of S.pieces.filter(p=>p.page===S.pageNum))
+    if(pointInPoly(mmX,mmY,p.poly) && (!hit || p.bb.w*p.bb.h < hit.bb.w*hit.bb.h)) hit=p;
+  if(hit){ hit.on=!hit.on; refreshPieceUI(); draw(); }
+});
+function pointInPoly(x,y,poly){
+  let inside=false;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    const [xi,yi]=poly[i], [xj,yj]=poly[j];
+    if((yi>y)!==(yj>y) && x < (xj-xi)*(y-yi)/(yj-yi)+xi) inside=!inside;
+  }
+  return inside;
+}
+
+/* ---------------- piece list ---------------- */
+function fitInfo(p){
+  const bx=+$('bedX').value, by=+$('bedY').value;
+  const a=alignedPoly(p);
+  const direct = a.w<=bx && a.h<=by;
+  const rot    = a.h<=bx && a.w<=by;
+  if(direct) return {ok:true, rot:false, w:a.w, h:a.h};
+  if(rot && $('autoRot').checked) return {ok:true, rot:true, w:a.h, h:a.w};
+  return {ok:false, rot:false, w:a.w, h:a.h};
+}
+/* final piece polygon: grain-aligned, origin top-left, optional 90° fit rotation */
+function exportPoly(p){
+  const a=alignedPoly(p);
+  const fit=fitInfo(p);
+  let pts=a.pts;
+  if(fit.rot) pts=pts.map(([x,y])=>[a.h-y, x]);     // rotate 90° cw — breaks grain
+  return pts;
+}
+function refreshPieceUI(){
+  const list=$('pieceList'); list.innerHTML='';
+  $('pieceCount').textContent = S.pieces.length
+    ? S.pieces.filter(p=>p.on).length+' kept / '+S.pieces.length+' found' : '';
+  if(!S.pieces.length){
+    list.innerHTML='<div class="note">No pieces yet.</div>';
+    $('btnSVG').disabled=$('btnGcode').disabled=true; return;
+  }
+  for(const p of S.pieces){
+    const card=document.createElement('div');
+    card.className='piece'+(p.on?'':' off');
+    const fit=fitInfo(p);
+    const d = p.grain ? norm90(90-p.grain.angle) : null;
+    const grainTxt = !p.grain
+      ? '<span class="flags bad">no grain found</span>'
+      : (Math.abs(d)<1
+          ? '<span class="flags" style="background:var(--ok)">grain vertical'+(p.grain.manual?' (manual)':'')+'</span>'
+          : '<span class="flags">grain '+fmt(Math.abs(d),0)+'° → rotates'+(p.grain.manual?' (manual)':'')+'</span>');
+    card.innerHTML =
+      '<span class="dim pg" style="cursor:pointer;text-decoration:underline" title="Show this page">p'+p.page+'</span>'+
+      '<span class="nm"></span>'+
+      '<span class="dim">'+fmt(fit.w,0)+'×'+fmt(fit.h,0)+'</span>'+
+      grainTxt+
+      (fit.ok ? (fit.rot?'<span class="flags bad">rot 90° — grain broken</span>':'')
+              : '<span class="flags bad">too big — skipped</span>')+
+      '<span class="spacer"></span>'+
+      '<button class="bg">Grain</button>'+
+      '<button class="bk">'+(p.on?'Drop':'Keep')+'</button>';
+    card.querySelector('.nm').textContent=p.name;
+    card.querySelector('.nm').onclick=()=>{
+      const v=prompt('Piece name (used for file names):', p.name);
+      if(v){ p.name=v.trim().replace(/[^\w\- ]+/g,'').replace(/\s+/g,'-')||p.name;
+             refreshPieceUI(); draw(); }
+    };
+    card.querySelector('.bk').onclick=()=>{ p.on=!p.on; refreshPieceUI(); draw(); };
+    card.querySelector('.bg').onclick=async ()=>{
+      if(p.page!==S.pageNum) await showPage(p.page);
+      S.grainPick={piece:p, pt:null};
+      setStatus('Tap one end of '+p.name+"'s grain arrow on the canvas, then the other end.");
+    };
+    card.querySelector('.pg').onclick=()=>{ if(p.page!==S.pageNum) showPage(p.page); };
+    list.appendChild(card);
+  }
+  const any=S.pieces.some(p=>p.on);
+  $('btnSVG').disabled=$('btnGcode').disabled=!any;
+}
+['bedX','bedY','autoRot'].forEach(id=>$(id).addEventListener('change',refreshPieceUI));
+$('alignGrain').addEventListener('change',()=>{ S.pieces.forEach(p=>p._al=null); refreshPieceUI(); });
+$('bedPreset').addEventListener('change', e=>{
+  if(e.target.value==='custom') return;
+  const [x,y]=e.target.value.split(',').map(Number);
+  $('bedX').value=x; $('bedY').value=y; refreshPieceUI();
+});
+['bedX','bedY'].forEach(id=>$(id).addEventListener('input',()=>{ $('bedPreset').value='custom'; }));
+
+/* ---------------- packing (translation only — grain preserved) ---------------- */
+function packSheets(pieces, bedX, bedY, gap, margin=5){
+  // shelf packing of bounding boxes, tallest first; layout space is y-down
+  const usableW = bedX-2*margin, usableH = bedY-2*margin;
+  const sorted = [...pieces].map(p=>({p, fit:fitInfo(p)}))
+    .sort((a,b)=> b.fit.h - a.fit.h);
+  const sheets=[];
+  for(const {p, fit} of sorted){
+    if(!fit.ok) continue;
+    const w=fit.w, h=fit.h;
+    let placed=false;
+    for(const s of sheets){
+      for(const shelf of s.shelves){
+        if(shelf.x + w <= usableW && shelf.y + h <= usableH){
+          s.items.push({p, x:margin+shelf.x, y:margin+shelf.y, rot:fit.rot});
+          shelf.x += w+gap;
+          shelf.h = Math.max(shelf.h, h);
+          placed=true; break;
+        }
+      }
+      if(placed) break;
+      // try opening a new shelf on this sheet
+      const last=s.shelves[s.shelves.length-1];
+      const ny=last.y+last.h+gap;
+      if(ny+h<=usableH && w<=usableW){
+        s.shelves.push({x:w+gap, y:ny, h});
+        s.items.push({p, x:margin, y:margin+ny, rot:fit.rot});
+        placed=true; break;
+      }
+    }
+    if(!placed){
+      if(w<=usableW && h<=usableH){
+        sheets.push({shelves:[{x:w+gap, y:0, h}], items:[{p, x:margin, y:margin, rot:fit.rot}]});
+      }else{
+        // fits the bed but not inside the margins: own sheet, centred
+        sheets.push({shelves:[{x:usableW, y:0, h:usableH}],
+                     items:[{p, x:(bedX-w)/2, y:(bedY-h)/2, rot:fit.rot}]});
+      }
+    }
+  }
+  return sheets;
+}
+function placedPoly(item){
+  let pts=exportPoly(item.p);                 // origin at piece top-left, rot applied
+  return pts.map(([x,y])=>[x+item.x, y+item.y]);   // layout space, y-down
+}
+
+/* ---------------- export: SVG ---------------- */
+$('btnSVG').addEventListener('click', ()=>{
+  const kept=S.pieces.filter(p=>p.on);
+  let i=0;
+  if($('pack').checked){
+    const bedX=+$('bedX').value, bedY=+$('bedY').value;
+    const sheets=packSheets(kept, bedX, bedY, +$('gap').value);
+    for(let s=0;s<sheets.length;s++){
+      let body='  <rect x="0" y="0" width="'+bedX+'" height="'+bedY
+        +'" fill="none" stroke="#999" stroke-width="0.3" stroke-dasharray="3 3"/>\n';
+      for(const it of sheets[s].items){
+        const pts=placedPoly(it);
+        body+='  <path d="M '+pts.map(q=>fmt(q[0],2)+' '+fmt(q[1],2)).join(' L ')
+          +' Z" fill="none" stroke="black" stroke-width="0.4"/>\n';
+        body+='  <text x="'+fmt(it.x+3,1)+'" y="'+fmt(it.y+8,1)
+          +'" font-size="6" fill="#B3402F">'+it.p.name+(it.rot?' (rot 90°)':'')+'</text>\n';
+      }
+      const svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+bedX+'mm" height="'+bedY
+        +'mm" viewBox="0 0 '+bedX+' '+bedY+'">\n'+body+'</svg>\n';
+      setTimeout(()=>download('sheet-'+(s+1)+'.svg', svg, 'image/svg+xml'), i++*350);
+    }
+    setStatus('Downloading '+sheets.length+' layout sheet SVG'+(sheets.length===1?'':'s')+'…');
+    return;
+  }
+  for(const p of kept){
+    const pts=exportPoly(p);
+    const xs=pts.map(q=>q[0]), ys=pts.map(q=>q[1]);
+    const w=Math.max(...xs), h=Math.max(...ys);
+    const d='M '+pts.map(q=>fmt(q[0],2)+' '+fmt(q[1],2)).join(' L ')+' Z';
+    const svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+fmt(w,1)+'mm" height="'
+      +fmt(h,1)+'mm" viewBox="0 0 '+fmt(w,1)+' '+fmt(h,1)+'">\n'
+      +'  <path d="'+d+'" fill="none" stroke="black" stroke-width="0.4"/>\n</svg>\n';
+    setTimeout(()=>download(p.name+'.svg', svg, 'image/svg+xml'), i++*350);
+  }
+  setStatus('Downloading '+i+' SVG file'+(i===1?'':'s')+'…');
+});
+
+/* (exportPoly defined above — grain-aligned) */
+
+/* ---------------- export: G-code ---------------- */
+$('btnGcode').addEventListener('click', ()=>{
+  const kept=S.pieces.filter(p=>p.on);
+  const skipped=kept.filter(p=>!fitInfo(p).ok).length;
+  let i=0;
+  if($('pack').checked){
+    const sheets=packSheets(kept, +$('bedX').value, +$('bedY').value, +$('gap').value);
+    for(let s=0;s<sheets.length;s++){
+      const g=makeSheetGcode(sheets[s], s+1, sheets.length);
+      setTimeout(()=>download('sheet-'+(s+1)+'.gcode', g, 'text/plain'), i++*350);
+    }
+    setStatus(sheets.length+' bed'+(sheets.length===1?'':'s')+' of G-code downloading'
+      +(skipped?' — '+skipped+' piece'+(skipped===1?'':'s')+' skipped (too big)':'')+'.');
+    return;
+  }
+  let made=0;
+  for(const p of kept){
+    if(!fitInfo(p).ok) continue;
+    const g=makeSheetGcode({items:[{p, x:0, y:0, rot:fitInfo(p).rot, centre:true}]}, 1, 1, p.name);
+    setTimeout(()=>download(p.name+'.gcode', g, 'text/plain'), i++*350);
+    made++;
+  }
+  setStatus(made+' G-code file'+(made===1?'':'s')+' downloading'
+    +(skipped?' — '+skipped+' skipped (too big for bed)':'')+'.');
+});
+
+function makeSheetGcode(sheet, num, total, soloName){
+  const bedX=+$('bedX').value, bedY=+$('bedY').value;
+  const lw=+$('lineW').value, lh=+$('layerH').value, layers=+$('nLayers').value;
+  const zoff=+$('zOff').value, flow=+$('flow').value, filD=+$('filD').value;
+  const speed=Math.round(+$('speed').value*60), travel=Math.round(+$('travel').value*60);
+  const tNoz=+$('tNoz').value, tBed=+$('tBed').value, retr=+$('retr').value;
+  const ePerMM=(lw*lh*flow)/(Math.PI*(filD/2)**2);
+  const names=sheet.items.map(it=>it.p.name).join(', ');
+
+  const G=[];
+  G.push(
+    '; pattern2gcode — '+(soloName||('sheet '+num+'/'+total))+' — outlines for printing on fabric',
+    '; pieces: '+names,
+    '; bed '+bedX+'x'+bedY+', line '+lw+' mm, layer '+lh+' mm, passes '+layers
+      +', flow '+flow+', Z offset '+zoff+' mm',
+    '; grain preserved: pieces keep PDF orientation (fabric grain along bed Y)',
+    '; NOTE: no purge line (fabric covers the bed) — prime the nozzle by hand first.',
+    'M83            ; relative extrusion',
+    'G21            ; mm',
+    'G90            ; absolute XY',
+    'M104 S'+tNoz+'   ; nozzle heat',
+    tBed>0?'M140 S'+tBed+'   ; bed heat':'; bed heat off (protect fabric)',
+    'G28            ; home',
+    tBed>0?'M190 S'+tBed:'; (no bed wait)',
+    'M109 S'+tNoz+'   ; wait for nozzle',
+    'G92 E0');
+  const hop=Math.max(1, lh+0.6);
+
+  for(let l=1;l<=layers;l++){
+    const z=zoff+l*lh;
+    G.push('; ==== pass '+l+'/'+layers+'  Z='+gnum(z)+' ====');
+    for(const it of sheet.items){
+      let pts=placedPoly(it);
+      if(it.centre){          // single-piece mode: centre on bed
+        const xs=pts.map(q=>q[0]), ys=pts.map(q=>q[1]);
+        const w=Math.max(...xs), h=Math.max(...ys);
+        pts=pts.map(([x,y])=>[x+(bedX-w)/2, y+(bedY-h)/2]);
+      }
+      const P=pts.map(([x,y])=>[x, bedY-y]);      // layout y-down -> bed y-up
+      G.push('; ---- '+it.p.name+(it.rot?' (rotated 90 - grain broken)':'')+' ----');
+      const [sx,sy]=P[0];
+      G.push('G0 Z'+gnum(z+hop)+' F'+travel);
+      G.push('G0 X'+gnum(sx)+' Y'+gnum(sy)+' F'+travel);
+      G.push('G0 Z'+gnum(z)+' F1200');
+      if(retr) G.push('G1 E'+gnum(retr)+' F1800 ; unretract');
+      let px=sx, py=sy;
+      for(const [x,y] of P.slice(1).concat([P[0]])){
+        const dd=Math.hypot(x-px,y-py);
+        if(dd<1e-4) continue;
+        G.push('G1 X'+gnum(x)+' Y'+gnum(y)+' E'+gnum(dd*ePerMM)+' F'+speed);
+        px=x; py=y;
+      }
+      if(retr) G.push('G1 E-'+gnum(retr)+' F1800 ; retract');
+      G.push('G0 Z'+gnum(z+hop)+' F1200');
+    }
+  }
+  G.push('; ---- done ----','M104 S0', tBed>0?'M140 S0':';',
+    'G91','G0 Z12 F1200','G90',
+    'G0 X5 Y'+gnum(bedY-10)+' F'+travel+' ; present','M84','');
+  return G.join('\n');
+}
+
+function download(name, text, mime){
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([text],{type:mime}));
+  a.download=name; document.body.appendChild(a); a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href); a.remove();}, 4000);
+}
+</script>
+</body>
+</html>
