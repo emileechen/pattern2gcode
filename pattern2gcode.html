@@ -27,7 +27,7 @@
   header .sub{font-size:13px; color:#6d675d}
   #shell{flex:1; display:flex; min-height:0}
   aside{
-    width:340px; overflow-y:auto; padding:14px 16px 40px;
+    width:420px; flex:none; overflow-y:auto; padding:14px 16px 24px;
     border-right:1px solid var(--seam); background:var(--muslin);
   }
   main{flex:1; min-width:0; display:flex; flex-direction:column}
@@ -107,15 +107,17 @@
   /* piece cards */
   #pieceList{display:flex; flex-direction:column; gap:7px}
   .piece{
-    display:flex; align-items:center; gap:9px; padding:8px 10px; background:#fff;
+    display:flex; flex-wrap:wrap; align-items:center; gap:6px 9px; padding:8px 10px; background:#fff;
     border:1px solid var(--seam); border-left:5px solid var(--thread); border-radius:8px;
   }
+  .piece .brk{flex-basis:100%; height:0}          /* forces the flags onto their own row */
   .piece.off{border-left-color:#b9b2a5; opacity:.55}
   .piece .sw{width:13px; height:13px; border-radius:3px; flex:none}
-  .piece .nm{font-weight:600; font-size:13.5px; cursor:pointer; text-decoration:underline dotted}
+  .piece .nm{font-weight:600; font-size:13.5px; cursor:pointer; text-decoration:underline dotted;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:190px}
   .piece .dim{font:12px var(--mono); color:#6d675d}
   .piece .flags{font-size:11.5px; color:#fff; background:var(--indigo);
-    border-radius:5px; padding:1px 6px}
+    border-radius:5px; padding:1px 6px; white-space:nowrap}
   .piece .flags.bad{background:var(--thread)}
   .piece .spacer{flex:1}
   .piece button{
@@ -124,13 +126,13 @@
   }
   .piece button:hover{background:var(--seam)}
   #status{
-    position:sticky; bottom:0; margin:0 -16px -40px; padding:9px 16px;
-    background:var(--ink); color:var(--paper); font-size:13px; min-height:20px;
+    flex:none; padding:7px 20px; background:var(--ink); color:var(--paper);
+    font-size:13px; min-height:18px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   }
   small.k{font:11.5px var(--mono); color:#6d675d}
   @media (max-width:780px){
     #shell{flex-direction:column}
-    aside{width:100%; max-height:none; border-right:0; order:2}
+    aside{width:100%; flex:1; max-height:none; border-right:0; order:2}
     main{order:1; min-height:46vh}
     #canvasWrap{min-height:40vh}
     header .sub{display:none}
@@ -253,10 +255,9 @@
     <button class="act" id="btnGcode" disabled>Download G-code</button>
     <div class="note">Grain arrows are detected inside each piece (blue arrows on the canvas; green if set by hand). Each piece is rotated so its grain runs along the bed's Y axis — lay your fabric with its grain along Y every time. Pieces marked "no grain found" won't be rotated: check them and use the Grain button to tap the arrow's two ends yourself. When packing is on, kept pieces are grouped onto as few beds as possible (one G-code file per bed, plus a matching SVG layout sheet). Pieces larger than the bed are skipped and flagged.</div>
   </section>
-
-  <div id="status">Ready.</div>
 </aside>
 </div>
+<div id="status">Ready.</div>
 
 <script>
 "use strict";
@@ -621,12 +622,28 @@ function findGrain(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, poly){
     const l1=tr+dt, l2=Math.max(tr-dt,1e-6);
     const aspect=Math.sqrt(l1/l2);
     if(aspect<3.5) continue;                 // rectangles, text, blobs
-    const th=0.5*Math.atan2(2*sxy, sxx-syy);
-    const ux=Math.cos(th), uy=Math.sin(th);
+    let th=0.5*Math.atan2(2*sxy, sxx-syy);
+    let ux=Math.cos(th), uy=Math.sin(th);
     let t0=1e9,t1=-1e9;
     for(const [x,y] of px){const t=(x-mx)*ux+(y-my)*uy; if(t<t0)t0=t; if(t>t1)t1=t;}
-    const len=t1-t0;
+    let len=t1-t0;
     if(len<minLenPx) continue;
+    // arrowheads (often a single barb on one side) pull the fit off-axis:
+    // refit on the middle 60% of the line — shaft only — then re-measure ends
+    {
+      const lo=t0+0.2*len, hi=t1-0.2*len;
+      let n2=0, mx2=0, my2=0;
+      for(const [x,y] of px){const t=(x-mx)*ux+(y-my)*uy; if(t>lo&&t<hi){mx2+=x; my2+=y; n2++;}}
+      if(n2>10){
+        mx2/=n2; my2/=n2;
+        let a=0,b=0,c2=0;
+        for(const [x,y] of px){const t=(x-mx)*ux+(y-my)*uy; if(t>lo&&t<hi){const dx=x-mx2,dy=y-my2; a+=dx*dx; b+=dx*dy; c2+=dy*dy;}}
+        th=0.5*Math.atan2(2*b, a-c2); ux=Math.cos(th); uy=Math.sin(th);
+        t0=1e9; t1=-1e9;
+        for(const [x,y] of px){const t=(x-mx)*ux+(y-my)*uy; if(t<t0)t0=t; if(t>t1)t1=t;}
+        len=t1-t0;
+      }
+    }
     // grain arrows float free inside the piece; hem/seam lines run to the outline
     const e1x=(minx+mx+t0*ux)*mmPerPx, e1y=(miny+my+t0*uy)*mmPerPx;
     const e2x=(minx+mx+t1*ux)*mmPerPx, e2y=(miny+my+t1*uy)*mmPerPx;
@@ -1011,15 +1028,15 @@ function refreshPieceUI(){
           ? '<span class="flags" style="background:var(--ok)">grain vertical'+(p.grain.manual?' (manual)':'')+'</span>'
           : '<span class="flags">grain '+fmt(Math.abs(d),0)+'° → rotates'+(p.grain.manual?' (manual)':'')+'</span>');
     card.innerHTML =
-      '<span class="dim pg" title="Page '+p.page+'">p'+p.page+'</span>'+
-      '<span class="nm"></span>'+
+      '<span class="nm" title="Page '+p.page+' — tap to rename"></span>'+
       '<span class="dim">'+fmt(fit.w,0)+'×'+fmt(fit.h,0)+'</span>'+
-      grainTxt+
-      (fit.ok ? (fit.rot?'<span class="flags bad">rot 90° — grain broken</span>':'')
-              : '<span class="flags bad">too big — skipped</span>')+
       '<span class="spacer"></span>'+
       '<button class="bg">Grain</button>'+
-      '<button class="bk">'+(p.on?'Drop':'Keep')+'</button>';
+      '<button class="bk">'+(p.on?'Drop':'Keep')+'</button>'+
+      '<span class="brk"></span>'+
+      grainTxt+
+      (fit.ok ? (fit.rot?'<span class="flags bad">rot 90° — grain broken</span>':'')
+              : '<span class="flags bad">too big — skipped</span>');
     card.querySelector('.nm').textContent=p.name;
     card.onclick=async e=>{
       if(e.target.tagName==='BUTTON' || e.target.classList.contains('nm')) return;
