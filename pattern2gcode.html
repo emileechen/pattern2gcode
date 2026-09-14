@@ -42,6 +42,7 @@
     display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:7px 14px;
     background:var(--muslin); border-bottom:1px solid var(--seam); font-size:13px;
   }
+  #editBar[hidden]{display:none}
   #editBar .nm{font-weight:700; cursor:pointer; text-decoration:underline dotted}
   #editBar .dim{font:12px var(--mono); color:#6d675d}
   #editBar .tip{color:#6d675d; margin-left:auto; font-size:12.5px}
@@ -179,6 +180,14 @@
       </select>
     </div>
     <div class="note" id="pageInfo"></div>
+    <div style="display:flex;gap:8px">
+      <button class="act ghost" id="btnSaveProj" disabled style="margin:0;flex:1;width:auto" title="Download a .p2g.json with your pieces, edits and settings">Save project</button>
+      <div class="filewrap" style="flex:1;margin:0">
+        <input type="file" id="projInput" accept=".json,application/json">
+        <button class="act ghost" style="margin:0;width:100%" title="Restore a saved .p2g.json (the matching PDF is needed too)">Load project…</button>
+      </div>
+    </div>
+    <div class="note">Progress is also saved automatically in this browser and offered back when you reopen the same PDF. The project file does not contain the PDF itself.</div>
   </section>
 
   <section>
@@ -256,6 +265,8 @@ const S = {
   pieces:[],          // {id,page,name,poly:[[mm,mm],...],bb:{...},on:true}
   zoom:1,
   sel:null,           // selected piece (edit mode)
+  pdfInfo:null,       // {name,size,pages,hash,pageMM} of the loaded PDF
+  pendingProject:null,// project loaded before its PDF
 };
 const $ = id => document.getElementById(id);
 const fmt = (n,d=1)=>Number(n).toFixed(d);
@@ -268,7 +279,13 @@ $('fileInput').addEventListener('change', async e=>{
   setStatus('Reading PDF…');
   try{
     const buf = await f.arrayBuffer();
+    const hash = await hashBytes(buf);
     S.pdf = await pdfjsLib.getDocument({data:buf}).promise;
+    S.pdfInfo = {name:f.name, size:f.size, pages:S.pdf.numPages, hash, pageMM:[]};
+    for(let i=1;i<=S.pdf.numPages;i++){
+      const v=(await S.pdf.getPage(i)).getViewport({scale:1});
+      S.pdfInfo.pageMM.push([+(v.width/72*25.4).toFixed(1), +(v.height/72*25.4).toFixed(1)]);
+    }
     const sel = $('pageSel'); sel.innerHTML=''; sel.disabled=false;
     const tog = $('pageToggles'); tog.innerHTML='';
     S.pageInc = new Set();
@@ -288,8 +305,19 @@ $('fileInput').addEventListener('change', async e=>{
     S.pageNum = 1; S.pieces=[]; selectPiece(null); refreshPieceUI();
     await showPage(1);
     $('btnFit').disabled=false; fitPage();
-    $('btnDetect').disabled = false;
+    $('btnDetect').disabled = false; $('btnSaveProj').disabled = false;
     setStatus('PDF loaded — '+S.pdf.numPages+' pages, all included. Untick pages to omit them, then detect.');
+    // a project loaded before its PDF, or autosaved work for this PDF?
+    if(S.pendingProject){
+      const proj=S.pendingProject; S.pendingProject=null;
+      if(projectMatches(proj) || confirm('This PDF does not match the one the project was saved with ('
+          +proj.pdf.name+', '+proj.pdf.pages+' pages). Load the project anyway?')) applyProject(proj, 'project file');
+    }else{
+      const auto=readAutosave(hash);
+      if(auto && auto.pieces.length && confirm('Found saved work for this PDF from '
+          +new Date(auto.savedAt).toLocaleString()+' ('+auto.pieces.length+' pieces). Restore it?'))
+        applyProject(auto, 'autosave');
+    }
   }catch(err){ setStatus('Could not read that PDF: '+err.message); }
 });
 $('pageSel').addEventListener('change', e=>showPage(+e.target.value));
@@ -344,6 +372,8 @@ $('btnDetect').addEventListener('click', async ()=>{
   if(!S.pdf) return;
   const pages=[...S.pageInc].sort((a,b)=>a-b);
   if(!pages.length){ setStatus('All pages are unticked — include at least one.'); return; }
+  if(S.pieces.length && !confirm('Re-detecting replaces all '+S.pieces.length
+      +' pieces, including any renames, drops, grain and outline edits. Continue?')) return;
   const t0 = performance.now();
   S.pieces=[]; selectPiece(null);
   try{
@@ -957,6 +987,7 @@ function refreshPieceUI(){
   const selCard=list.querySelector('.sel'); if(selCard) selCard.scrollIntoView({block:'nearest'});
   const any=S.pieces.some(p=>p.on);
   $('btnSVG').disabled=$('btnGcode').disabled=!any;
+  scheduleAutosave();
 }
 ['bedX','bedY','autoRot'].forEach(id=>$(id).addEventListener('change',refreshPieceUI));
 $('alignGrain').addEventListener('change',()=>{ S.pieces.forEach(p=>p._al=null); refreshPieceUI(); });
@@ -1140,6 +1171,99 @@ function makeSheetGcode(sheet, num, total, soloName){
     'G0 X5 Y'+gnum(bedY-10)+' F'+travel+' ; present','M84','');
   return G.join('\n');
 }
+
+/* ---------------- project save / load / autosave ---------------- */
+const PROJECT_FORMAT='pattern2gcode-project', PROJECT_VERSION=1;
+const SETTING_IDS=['dpiSel','thr','minPiece','gapClose','bedPreset','bedX','bedY','lineW','layerH',
+  'nLayers','zOff','speed','travel','flow','filD','tNoz','tBed','retr','alignGrain','pack','gap','autoRot'];
+const AUTOSAVE_KEY=h=>'p2g:'+h;
+
+async function hashBytes(buf){
+  if(crypto.subtle){
+    const d=await crypto.subtle.digest('SHA-256', buf);
+    return [...new Uint8Array(d)].map(b=>b.toString(16).padStart(2,'0')).join('');
+  }
+  let h=0x811c9dc5; const u=new Uint8Array(buf);           // FNV-1a fallback
+  for(let i=0;i<u.length;i++){ h^=u[i]; h=Math.imul(h,0x01000193)>>>0; }
+  return 'fnv-'+h.toString(16)+'-'+u.length;
+}
+const r2=v=>Math.round(v*100)/100;                           // 0.01 mm is plenty
+function serializeProject(){
+  const settings={};
+  for(const id of SETTING_IDS){ const el=$(id); settings[id]= el.type==='checkbox' ? el.checked : el.value; }
+  return {
+    format:PROJECT_FORMAT, version:PROJECT_VERSION, savedAt:new Date().toISOString(),
+    pdf:S.pdfInfo, pagesIncluded:[...S.pageInc].sort((a,b)=>a-b), viewPage:S.pageNum, settings,
+    pieces:S.pieces.map(p=>({
+      page:p.page, name:p.name, on:p.on,
+      poly:p.poly.map(([x,y])=>[r2(x),r2(y)]),
+      poly0:p.poly0.map(([x,y])=>[r2(x),r2(y)]),
+      grain:p.grain ? {x1:r2(p.grain.x1),y1:r2(p.grain.y1),x2:r2(p.grain.x2),y2:r2(p.grain.y2),
+                       angle:r2(p.grain.angle),len:r2(p.grain.len),manual:!!p.grain.manual} : null,
+    })),
+  };
+}
+function projectMatches(proj){
+  return !!(S.pdfInfo && proj.pdf && proj.pdf.hash===S.pdfInfo.hash);
+}
+function applyProject(proj, source){
+  for(const id of SETTING_IDS){
+    if(!(id in proj.settings)) continue;
+    const el=$(id); if(el.type==='checkbox') el.checked=!!proj.settings[id]; else el.value=proj.settings[id];
+  }
+  S.pageInc=new Set(proj.pagesIncluded.filter(n=>n>=1&&n<=S.pdf.numPages));
+  [...$('pageToggles').querySelectorAll('input')].forEach((cb,i)=>{ cb.checked=S.pageInc.has(i+1); });
+  S.pieces=proj.pieces.map((q,i)=>({
+    id:i+1, page:q.page, name:q.name, on:q.on!==false,
+    poly:q.poly.map(v=>v.slice()), poly0:(q.poly0||q.poly).map(v=>v.slice()), grain:q.grain||null,
+  }));
+  S.pieces.forEach(recalcBB);
+  selectPiece(null);
+  const pg=Math.min(Math.max(proj.viewPage||1,1),S.pdf.numPages);
+  showPage(pg).then(()=>{ fitPage(); refreshPieceUI(); draw();
+    setStatus('Restored '+S.pieces.length+' pieces from '+source+' (saved '
+      +new Date(proj.savedAt).toLocaleString()+').'); });
+}
+function projectFileName(){
+  return (S.pdfInfo ? S.pdfInfo.name.replace(/\.pdf$/i,'') : 'pattern')+'.p2g.json';
+}
+$('btnSaveProj').addEventListener('click', ()=>{
+  if(!S.pdf) return;
+  download(projectFileName(), JSON.stringify(serializeProject(), null, 1), 'application/json');
+  setStatus('Project saved as '+projectFileName()+'.');
+});
+$('projInput').addEventListener('change', async e=>{
+  const f=e.target.files[0]; e.target.value=''; if(!f) return;
+  let proj;
+  try{ proj=JSON.parse(await f.text()); }catch(err){ setStatus('That file is not valid JSON.'); return; }
+  if(!proj || proj.format!==PROJECT_FORMAT || !Array.isArray(proj.pieces) || !proj.pdf){
+    setStatus('That file is not a pattern2gcode project.'); return; }
+  if(proj.version>PROJECT_VERSION){ setStatus('This project was saved by a newer version of the tool.'); return; }
+  if(!S.pdf){
+    S.pendingProject=proj;
+    setStatus('Project read ('+proj.pieces.length+' pieces). Now choose its PDF: '+proj.pdf.name+'.');
+    return;
+  }
+  if(!projectMatches(proj) && !confirm('The open PDF does not match the one this project was saved with ('
+      +proj.pdf.name+', '+proj.pdf.pages+' pages). Load the project anyway?')) return;
+  if(S.pieces.length && !confirm('Loading replaces the current '+S.pieces.length+' pieces. Continue?')) return;
+  applyProject(proj, 'project file');
+});
+
+let autosaveTimer=null;
+function scheduleAutosave(){
+  if(!S.pdfInfo || !S.pieces.length) return;   // never clobber saved work with an empty state
+  clearTimeout(autosaveTimer);
+  autosaveTimer=setTimeout(()=>{
+    try{ localStorage.setItem(AUTOSAVE_KEY(S.pdfInfo.hash), JSON.stringify(serializeProject())); }
+    catch(err){ /* storage full or blocked — the explicit Save still works */ }
+  }, 800);
+}
+function readAutosave(hash){
+  try{ const t=localStorage.getItem(AUTOSAVE_KEY(hash)); return t ? JSON.parse(t) : null; }
+  catch(err){ return null; }
+}
+document.querySelector('aside').addEventListener('change', scheduleAutosave);
 
 function download(name, text, mime){
   const a=document.createElement('a');
