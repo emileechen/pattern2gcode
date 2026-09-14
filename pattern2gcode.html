@@ -997,8 +997,8 @@ $('edReset').onclick=()=>{ const p=S.sel; if(!p) return;
   setStatus(p.name+' outline restored to the detected one.'); };
 $('edDone').onclick=()=>selectPiece(null);
 function renamePiece(p){
-  const v=prompt('Piece name (used for file names):', p.name);
-  if(v){ p.name=v.trim().replace(/[^\w\- ]+/g,'').replace(/\s+/g,'-')||p.name; p.nameUnsure=false; p.nameMissing=false;
+  const v=prompt('Piece name (symbols such as / are fine; file names are derived from it):', p.name);
+  if(v){ p.name=v.trim().replace(/[\x00-\x1f]+/g,'').replace(/\s+/g,' ')||p.name; p.nameUnsure=false; p.nameMissing=false;
          if(S.sel===p) selectPiece(p,{frame:false}); else { refreshPieceUI(); draw(); } }
 }
 async function startGrainPick(p){
@@ -1329,7 +1329,7 @@ $('btnSVG').addEventListener('click', ()=>{
     const svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+fmt(w,1)+'mm" height="'
       +fmt(h,1)+'mm" viewBox="0 0 '+fmt(w,1)+' '+fmt(h,1)+'">\n'
       +'  <path d="'+d+'" fill="none" stroke="black" stroke-width="0.4"/>\n</svg>\n';
-    setTimeout(()=>download(p.name+'.svg', svg, 'image/svg+xml'), i++*350);
+    setTimeout(()=>download(fileNameFor(p)+'.svg', svg, 'image/svg+xml'), i++*350);
   }
   setStatus('Downloading '+i+' SVG file'+(i===1?'':'s')+'…');
 });
@@ -1355,7 +1355,7 @@ $('btnGcode').addEventListener('click', ()=>{
   for(const p of kept){
     if(!fitInfo(p).ok) continue;
     const g=makeSheetGcode({items:[{p, x:0, y:0, rot:fitInfo(p).rot, centre:true}]}, 1, 1, p.name);
-    setTimeout(()=>download(p.name+'.gcode', g, 'text/plain'), i++*350);
+    setTimeout(()=>download(fileNameFor(p)+'.gcode', g, 'text/plain'), i++*350);
     made++;
   }
   setStatus(made+' G-code file'+(made===1?'':'s')+' downloading'
@@ -1439,7 +1439,7 @@ async function getOcrWorker(){
   }
   ocrWorker=await Tesseract.createWorker('eng');
   await ocrWorker.setParameters({tessedit_pageseg_mode:'7',        // one text line
-    tessedit_char_whitelist:'0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'});
+    tessedit_char_whitelist:'0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ/'});
   return ocrWorker;
 }
 async function renderCanvasAt(num, dpi){
@@ -1527,12 +1527,13 @@ function findLabelCrops(pageCanvas, pxPerMM, p){
   return crops;
 }
 const DEFAULT_NAME=/^p\d+-piece-\d+(-\d+)?$/;
-const LABEL_RE=/^\d{1,2}[a-z]{0,2}$/;                     // "2d", "12", "14a" — number, optional letter(s)
+const LABEL_RE=/^\d{1,2}(\/\d{1,2})?[a-z]{0,2}$/;          // "2d", "12", "14a", "14/1g"
 /* OCR loves to read 1 as i/l and 0 as o; labels lead with digits, so fix the leading run */
 function normalizeLabel(t){
   t=t.replace(/\s+/g,'');
-  const m=t.match(/^([0-9ilI|oO]+)([A-Za-z]*)$/); if(!m) return t.toLowerCase();
-  return m[1].replace(/[ilI|]/g,'1').replace(/[oO]/g,'0')+m[2].toLowerCase();
+  const m=t.match(/^([0-9ilI|oO\/]+)([A-Za-z]*)$/); if(!m) return t.toLowerCase();
+  const num=m[1].replace(/\/+/g,'/').replace(/[ilI|]/g,'1').replace(/[oO]/g,'0');
+  return num+m[2].toLowerCase();
 }
 /* read one crop with two segmentation modes and combine */
 async function readLabel(worker, canvas){
@@ -1695,6 +1696,10 @@ function readAutosave(hash){
 }
 document.querySelector('aside').addEventListener('change', scheduleAutosave);
 
+/* names are labels and may hold symbols ("14/1g"); files get a safe form */
+function fileNameFor(p){
+  return (p.name.replace(/[\/\\:]+/g,'-').replace(/[^\w\-+.() &]+/g,'').replace(/\s+/g,'-').replace(/^-+|-+$/g,'')) || ('piece-'+(S.pieces.indexOf(p)+1));
+}
 function download(name, text, mime){
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([text],{type:mime}));
