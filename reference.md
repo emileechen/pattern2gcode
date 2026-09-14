@@ -1,0 +1,58 @@
+# Selvedge 2 — Reference Guide
+
+Selvedge 2 turns a scanned (non-vector) sewing-pattern PDF into G-code that a 3D printer traces directly onto fabric, printing each piece's cutting outline as a thin plastic line. It runs entirely in your browser from a single file, `selvedge2.html`. Your PDF is never uploaded anywhere; the only network access is loading the PDF-reading library from a CDN when the page opens.
+
+## Setup
+
+Keep `selvedge2.html` and your pattern PDF together in a project folder. Double-click the HTML file to open it in Chrome, Edge, or Firefox. Exports save through your browser's normal download mechanism, so either set the browser to ask where to save files or move them from Downloads into your project folder afterward.
+
+## The workflow
+
+The sidebar walks through five steps. You load a PDF, detect pieces, review and correct what was found, set your printer parameters, and export.
+
+**Step 1 — Pattern PDF.** Choose a true-scale copyshop PDF (A0/A1 print-shop files, not the tiled home-print version). The tool reads the physical page dimensions from the PDF itself, so scale is exact with no calibration square needed; the sidebar reports the page size and the mm-per-pixel resolution it is working at. Every page starts included; untick any page you want omitted from detection and export. The "View page" selector controls which page the canvas shows. Trace detail sets the working resolution — Fine (0.35 mm/px) is the default and is more than enough for sewing tolerances; higher settings are slower and rarely worth it.
+
+**Step 2 — Detect pieces.** Detection runs on every included page in one pass (typically under a second per page). It thresholds the page to keep only dark ink, floods the background from the page edges, and treats every enclosed region as one filled blob, then traces each blob's outer boundary. Because only the *outer* boundary is traced, everything drawn inside a piece — grain arrows, seam and hem lines, patch placement boxes, size labels, gray fill patterns — is automatically excluded from the cutting outline. The minimum piece size filter (default 60 mm) drops text blocks, logos, and stray marks. The line threshold (default 200) controls what counts as ink; lower it only if faint outlines are being missed, raise it if gray shading is being picked up.
+
+**Step 3 — Pieces.** This is the human-review step, and it matters: detection is reliable but not infallible, and only you know which shapes are real pattern pieces. Each detected piece appears as a red dashed overlay on the canvas and as a card in the list. Tap a piece on the canvas (or its Keep/Drop button) to toggle whether it exports — dropped pieces turn gray. Tap the page badge (p1, p2…) on a card to jump the canvas to that piece's page. Tap a piece's name to rename it; names become the export file names, so `p3-piece-7` renamed to `bodice-front` exports as part of a sheet listing `bodice-front`. The header shows a running count of kept versus found.
+
+**Grain arrows.** Inside every kept piece the tool looks for the grain arrow: the longest thin, straight ink line whose *ends float clear of the outline*. That clearance test is what distinguishes a grain arrow from hem, fold, and seam lines, which run all the way to the piece edge. Detected grain shows as a blue double-headed arrow on the canvas, and each card reports one of three states. "Grain vertical" (green) means the piece needs no rotation. "Grain N° → rotates" means the piece will be rotated by that angle at export so its grain runs along the bed's Y axis. "No grain found" (red) means the piece will *not* be rotated — check it on the canvas, press the card's Grain button, and tap the two ends of the arrow yourself; hand-set grain draws in green and is marked "(manual)". A manual grain always overrides a detected one, so you can also use it to correct a detection you disagree with. Direction along the arrow doesn't matter — grain is an axis, so tapping top-then-bottom and bottom-then-top give the same result.
+
+**Step 4 — Printer & fabric.** Settings for your machine and material.
+
+| Setting | Default | Notes |
+|---|---|---|
+| Bed size | 270 × 270 | Presets for common printers, or type custom values |
+| Line width | 0.4 mm | Match your nozzle diameter |
+| Layer height | 0.2 mm | Height of each printed pass |
+| Passes | 1 | Extra passes retrace the same line higher for a stronger ridge |
+| Z offset | 0.20 mm | Set to your fabric's thickness — this is the critical number |
+| Print speed | 18 mm/s | Slow and clean; thin lines on fabric don't like speed |
+| Travel speed | 120 mm/s | Moves between pieces |
+| Flow multiplier | 1.10 | Slight over-extrusion helps the line grip the weave |
+| Filament Ø | 1.75 mm | |
+| Nozzle temp | 210 °C | PLA; slightly hot helps bonding |
+| Bed temp | 0 (off) | Keep off or low so the fabric doesn't shrink or scorch |
+| Retraction | 1.0 mm | Applied at the end of each piece's loop |
+
+**Step 5 — Export.** Three toggles shape the output. *Rotate pieces so grain runs vertical* (on by default) applies each piece's grain correction. *Pack several pieces per bed* groups kept pieces onto as few beds as possible, translation-only so grain stays true, with the spacing you set between them and a 5 mm margin from the bed edge; pieces that fit the bed but not inside the margins get a bed of their own, centered. *Rotate 90° if needed to fit* is off by default because a 90° turn breaks grain direction — only enable it for pieces where grain genuinely doesn't matter, and the piece card and the G-code both warn when it happens.
+
+With packing on, the G-code button downloads one `sheet-N.gcode` per bed and the SVG button downloads a matching `sheet-N.svg` for each: a drawing of the bed with every piece's outline and name placed exactly where it will print, so you can check fabric coverage before starting. With packing off you get one file per piece, centered on the bed. Pieces larger than the bed in every allowed orientation are skipped and flagged "too big" in the list — trace those by hand or from their SVG.
+
+## Printing on fabric
+
+Tape the fabric taut to the bed on all four sides, with its grain running along the bed's Y axis (front to back) — that single convention is what makes every exported piece land grain-true. The nozzle presses molten plastic into the weave at fabric height, which is why the Z offset must match the fabric thickness: too low and the nozzle drags and snags, too high and the line sits on top and peels off. No purge or prime line is generated, because fabric covers the bed where one would go — extrude a few millimeters of filament by hand just before starting each print so the nozzle is already flowing. The generated G-code heats the nozzle (and bed if enabled), homes, prints every piece's loop for each pass with Z-hops on travel moves, then lifts, parks, and disables motors.
+
+Dial in your first print on scrap fabric: one small sheet, checking that lines bond without distorting the cloth. Adjust Z offset first, then flow, then temperature, in that order.
+
+## Troubleshooting
+
+A piece detected as two fragments, or a bite missing from an outline, means the printed line had a gap at the working resolution — lower the line threshold slightly or raise trace detail, then re-detect. Random speckles or the gray fill being traced means the threshold is too high; raise the minimum piece size or lower the threshold. A wrong grain arrow (it grabbed a stray internal line) is fixed in seconds with the manual Grain button. Re-running detection resets all keep/drop choices, renames, and manual grain, so finish tuning detection before investing in refinement. If the page renders blank, check your internet connection — the PDF library loads from a CDN on page open.
+
+## Limitations worth knowing
+
+The tool prints cutting outlines only: internal markings (darts, notches, placement boxes) are deliberately excluded and would need to be transferred by hand. Pieces are never mirrored, and "cut on fold" or "cut 2" instructions on the pattern still apply to you — the tool prints exactly one outline per detected shape, as drawn. Packing is translation-only by design; it will use more beds than a rotation-happy packer, and that is the price of preserved grain. And the detector assumes dark outlines on a light page; inverted or heavily colored patterns would need re-thresholding logic.
+
+## Reference results for the Robertswood Flower Patchwork Dress (A0, size 14–16)
+
+For the PDF this tool was tuned against, with default settings: 122 pieces detected across 7 pages (29, 17, 29, 24, 20, 2, 1). Grain arrows found on 109 pieces, 101 of them within 3° of vertical; the handful flagged over 45° and the 13 not found should be checked and set manually. On a 270 × 270 bed, 110 pieces fit; the 12 skipped are the long strap/binding strips (~103 × 292 mm) and the large panels on pages 6–7 (up to 954 × 418 mm), which need hand tracing from their SVGs. Packed output is 74 beds at 8 mm spacing.
