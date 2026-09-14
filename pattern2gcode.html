@@ -804,10 +804,21 @@ function findJunctions(lbl, dark, W, H, id, minx, miny, maxx, maxy, mmPerPx, pol
   }
   return ticks;
 }
-/* extension as a segment in page mm: along the line, through the cut line */
-function tickSegment(p, t){
+/* extension as a segment in page mm: along the line, through the cut line.
+   The outward part stops short of any polygon in `polys` — the piece's own
+   outline where it is concave, or a neighbour — so nothing is printed on
+   fabric that stays. */
+function tickSegment(p, t, polys){
   const dx=t.dx!==undefined?t.dx:t.nx, dy=t.dy!==undefined?t.dy:t.ny;     // older saves stored a normal
-  const out=+$('tickOut').value, inn=+$('tickIn').value;
+  let out=+$('tickOut').value; const inn=+$('tickIn').value;
+  if(polys && polys.length){
+    const step=0.5;
+    for(let s2=1; s2<=out; s2+=step){
+      const x=t.x+dx*s2, y=t.y+dy*s2;
+      if(polys.some(q=>pointInPoly(x,y,q))){ out=Math.max(0, s2-step-0.5); break; }
+    }
+  }
+  if(out<1) return null;                                 // nothing outside to show: skip it
   return [[t.x-dx*inn, t.y-dy*inn], [t.x+dx*out, t.y+dy*out]];
 }
 const ticksOn = () => $('tickOn').checked;
@@ -849,7 +860,7 @@ function exportPts(p, pts){
 /* tick segments for export, in the piece's export frame */
 function exportTicks(p){
   if(!ticksOn() || !p.ticks) return [];
-  return p.ticks.map(t=>exportPts(p, tickSegment(p,t)));
+  return p.ticks.map(t=>tickSegment(p,t,[p.poly])).filter(Boolean).map(seg=>exportPts(p, seg));
 }
 
 /* ---------------- canvas & refinement ---------------- */
@@ -867,7 +878,7 @@ function bedLayout(){
   const kept=S.pieces.filter(p=>p.on);
   const bedX=+$('bedX').value, bedY=+$('bedY').value;
   let sheets;
-  if($('pack').checked) sheets=packSheets(kept, bedX, bedY, +$('gap').value);
+  if($('pack').checked) sheets=packSheets(kept, bedX, bedY, +$('gap').value+L0(), 5+L0());
   else sheets=kept.filter(p=>fitInfo(p).ok).map(p=>{ const f=fitInfo(p);
     return {items:[{p, x:(bedX-f.w)/2, y:(bedY-f.h)/2, rot:f.rot}]}; });
   const skipped=kept.filter(p=>!fitInfo(p).ok);
@@ -995,10 +1006,11 @@ function draw(){
       ctx.strokeStyle='#a49c8d'; ctx.setLineDash([2,5]); ctx.lineWidth=1.4;
     }
     ctx.stroke(); ctx.setLineDash([]);
-    // edge ticks
+    // sew-line extensions, clipped so they never run onto a piece
     if(p.on && ticksOn() && p.ticks && p.ticks.length){
+      const polys=S.pieces.filter(q=>q.page===S.pageNum && q.on).map(q=>q.poly);
       ctx.strokeStyle='#39536B'; ctx.lineWidth=1.6; ctx.beginPath();
-      for(const t of p.ticks){ const [[x1,y1],[x2,y2]]=tickSegment(p,t);
+      for(const t of p.ticks){ const seg=tickSegment(p,t,polys); if(!seg) continue; const [[x1,y1],[x2,y2]]=seg;
         ctx.moveTo(x1*pxPerMM,y1*pxPerMM); ctx.lineTo(x2*pxPerMM,y2*pxPerMM); }
       ctx.stroke();
     }
@@ -1457,7 +1469,7 @@ $('btnSVG').addEventListener('click', ()=>{
   let i=0;
   if($('pack').checked){
     const bedX=+$('bedX').value, bedY=+$('bedY').value;
-    const sheets=packSheets(kept, bedX, bedY, +$('gap').value);
+    const sheets=packSheets(kept, bedX, bedY, +$('gap').value+L0(), 5+L0());
     for(let s=0;s<sheets.length;s++){
       let body='  <rect x="0" y="0" width="'+bedX+'" height="'+bedY
         +'" fill="none" stroke="#999" stroke-width="0.3" stroke-dasharray="3 3"/>\n';
@@ -1499,7 +1511,7 @@ $('btnGcode').addEventListener('click', ()=>{
   const skipped=kept.filter(p=>!fitInfo(p).ok).length;
   let i=0;
   if($('pack').checked){
-    const sheets=packSheets(kept, +$('bedX').value, +$('bedY').value, +$('gap').value);
+    const sheets=packSheets(kept, +$('bedX').value, +$('bedY').value, +$('gap').value+L0(), 5+L0());
     for(let s=0;s<sheets.length;s++){
       const g=makeSheetGcode(sheets[s], s+1, sheets.length);
       setTimeout(()=>download('sheet-'+(s+1)+'.gcode', g, 'text/plain'), i++*350);
@@ -1579,8 +1591,9 @@ function makeSheetGcode(sheet, num, total, soloName){
       }
       if(retr) G.push('G1 E-'+gnum(retr)+' F1800 ; retract');
       G.push('G0 Z'+gnum(z+hop)+' F1200');
+      ticks=ticks.filter(seg=>seg.every(([x,y])=>x>=0&&x<=bedX&&y>=0&&y<=bedY));   // never off the bed
       if(ticks.length){
-        G.push('; edge ticks ('+ticks.length+')');
+        G.push('; sew-line extensions ('+ticks.length+')');
         for(const [[x1,y1],[x2,y2]] of ticks){
           const ax=x1, ay=bedY-y1, bx=x2, by=bedY-y2;
           G.push('G0 X'+gnum(ax)+' Y'+gnum(ay)+' F'+travel);
