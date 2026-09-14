@@ -8,7 +8,7 @@ Keep `pattern2gcode.html` and your pattern PDF together in a project folder. Dou
 
 ## The workflow
 
-The sidebar walks through five steps. You load a PDF, detect pieces, review and correct what was found, set your printer parameters, and export.
+The sidebar walks through five steps. You load a PDF, detect pieces, review and correct what was found, set your printer parameters, and export. Each step's heading folds its section away; steps 1 and 2 fold automatically once pieces exist (their headings keep a one-line summary), so the piece list gets the room — click a heading to open it again.
 
 **Step 1 — Pattern PDF.** Choose a true-scale copyshop PDF (A0/A1 print-shop files, not the tiled home-print version). The tool reads the physical page dimensions from the PDF itself, so scale is exact with no calibration square needed; the sidebar reports the page size and the mm-per-pixel resolution it is working at. Every page starts included; untick any page you want omitted from detection and export. The ◀ ▶ buttons above the canvas (or the ← → keys) step through pages, and the "View page" selector in the sidebar does the same. The page opens zoomed to fit; the zoom slider goes up to 500 %, **Fit** brings the whole page back into view, and you drag anywhere on the canvas to pan. Trace detail sets the working resolution — Fine (0.35 mm/px) is the default and is more than enough for sewing tolerances; higher settings are slower and rarely worth it.
 

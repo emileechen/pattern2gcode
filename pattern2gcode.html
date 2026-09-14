@@ -35,6 +35,8 @@
   #canvasWrap canvas{display:block; margin:16px auto; background:#fff;
     box-shadow:0 2px 14px rgba(38,34,28,.18); cursor:grab; touch-action:none}
   #canvasWrap.panning canvas{cursor:grabbing}
+  #canvasWrap.picking canvas{cursor:crosshair}    /* placing grain points */
+  #canvasWrap.onHandle canvas{cursor:move}
   #canvasBar{display:flex; gap:10px; align-items:center; padding:8px 14px;
     border-bottom:1px solid var(--seam); background:var(--paper); flex-wrap:wrap}
   #canvasBar .hint{font-size:13px; color:#6d675d; margin-left:auto}
@@ -68,7 +70,14 @@
   section h2{
     font-size:13.5px; font-weight:700; margin:0 0 10px; padding-bottom:5px;
     border-bottom:1.5px dashed var(--thread); /* running stitch */
+    cursor:pointer; user-select:none; display:flex; align-items:baseline; gap:6px;
   }
+  section h2::before{content:'▾'; font-size:11px; color:#6d675d; width:10px; flex:none}
+  section.collapsed h2::before{content:'▸'}
+  section h2 .sum{font-weight:400; font-size:12px; color:#6d675d; margin-left:auto; text-align:right;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:60%}
+  section.collapsed h2{margin-bottom:0}
+  section.collapsed > :not(h2){display:none !important}
   .row{display:flex; align-items:center; justify-content:space-between; gap:10px; margin:7px 0}
   .row label{font-size:13.5px}
   .row input[type=number], .row select{
@@ -162,8 +171,8 @@
 </main>
 
 <aside>
-  <section>
-    <h2>1 · Pattern PDF</h2>
+  <section id="sec1">
+    <h2>1 · Pattern PDF <span class="sum" id="sum1"></span></h2>
     <div class="filewrap">
       <input type="file" id="fileInput" accept="application/pdf">
       <div class="facade"><b>Choose PDF</b>true-scale copyshop file (A0 etc.)</div>
@@ -190,8 +199,8 @@
     <div class="note">Progress is also saved automatically in this browser and offered back when you reopen the same PDF. The project file does not contain the PDF itself.</div>
   </section>
 
-  <section>
-    <h2>2 · Detect pieces</h2>
+  <section id="sec2">
+    <h2>2 · Detect pieces <span class="sum" id="sum2"></span></h2>
     <div class="row"><label>Line threshold</label><input type="number" id="thr" value="200" min="40" max="250" step="5"></div>
     <div class="row"><label>Min piece size (mm)</label><input type="number" id="minPiece" value="60" min="20" max="400" step="5"></div>
     <div class="row"><label>Close outline gaps (mm)</label><input type="number" id="gapClose" value="1.0" min="0" max="6" step="0.5"></div>
@@ -273,6 +282,17 @@ const fmt = (n,d=1)=>Number(n).toFixed(d);
 const gnum = n => { const s = n.toFixed(4); return s.replace(/\.?0+$/,''); };
 const setStatus = t => { $('status').textContent = t; };
 
+/* ---------------- collapsible sidebar sections ---------------- */
+document.querySelectorAll('aside section h2').forEach(h=>{
+  h.addEventListener('click', ()=>h.parentElement.classList.toggle('collapsed'));
+});
+/* once pieces exist, fold steps 1 and 2 away so the piece list gets the room */
+function foldSetupSections(){
+  $('sum1').textContent = S.pdfInfo ? S.pdfInfo.name+' · '+S.pageInc.size+'/'+S.pdf.numPages+' pages' : '';
+  $('sum2').textContent = S.pieces.length ? S.pieces.length+' found' : '';
+  $('sec1').classList.add('collapsed'); $('sec2').classList.add('collapsed');
+}
+
 /* ---------------- PDF load & render ---------------- */
 $('fileInput').addEventListener('change', async e=>{
   const f = e.target.files[0]; if(!f) return;
@@ -303,6 +323,8 @@ $('fileInput').addEventListener('change', async e=>{
       tog.appendChild(lb);
     }
     S.pageNum = 1; S.pieces=[]; selectPiece(null); refreshPieceUI();
+    $('sec1').classList.remove('collapsed'); $('sec2').classList.remove('collapsed');
+    $('sum1').textContent=''; $('sum2').textContent='';
     await showPage(1);
     $('btnFit').disabled=false; fitPage();
     $('btnDetect').disabled = false; $('btnSaveProj').disabled = false;
@@ -333,7 +355,7 @@ document.addEventListener('keydown', e=>{
   if(t==='INPUT'||t==='SELECT'||t==='TEXTAREA') return;   // don't hijack form fields
   if(e.key==='ArrowLeft'){ e.preventDefault(); stepPage(-1); }
   else if(e.key==='ArrowRight'){ e.preventDefault(); stepPage(1); }
-  else if(e.key==='Escape'){ if(S.grainPick){ S.grainPick=null; draw(); setStatus('Grain pick cancelled.'); } else if(S.sel) selectPiece(null); }
+  else if(e.key==='Escape'){ if(S.grainPick){ S.grainPick=null; $('canvasWrap').classList.remove('picking'); draw(); setStatus('Grain pick cancelled.'); } else if(S.sel) selectPiece(null); }
   else if((e.key==='Delete'||e.key==='Backspace') && S.sel){ e.preventDefault(); S.sel.on=!S.sel.on; selectPiece(S.sel,{frame:false}); }
 });
 $('dpiSel').addEventListener('change', ()=>{ if(S.pdf) showPage(S.pageNum); });
@@ -388,7 +410,7 @@ $('btnDetect').addEventListener('click', async ()=>{
       S.pieces.push(...found);
       await new Promise(res=>setTimeout(res,10));    // keep UI responsive
     }
-    refreshPieceUI(); draw();
+    refreshPieceUI(); draw(); foldSetupSections();
     setStatus('Found '+S.pieces.length+' pieces across '+pages.length+' page'
       +(pages.length===1?'':'s')+' in '+fmt((performance.now()-t0)/1000,1)
       +' s. Tap a piece to select it.');
@@ -832,6 +854,7 @@ function renamePiece(p){
 async function startGrainPick(p){
   if(p.page!==S.pageNum) await showPage(p.page);
   S.grainPick={piece:p, pt:null};
+  $('canvasWrap').classList.add('picking');
   setStatus('Tap one end of '+p.name+"'s grain arrow on the canvas, then the other end.");
 }
 
@@ -858,6 +881,10 @@ async function startGrainPick(p){
     cv.setPointerCapture(e.pointerId);
   });
   cv.addEventListener('pointermove', e=>{
+    if(!drag && !pan && !S.grainPick){                // idle: show a move cursor over a point
+      const [mmX,mmY]=canvasMM(e);
+      wrap.classList.toggle('onHandle', !!hitHandle(mmX,mmY));
+    }
     if(drag && e.pointerId===drag.id){
       const [mmX,mmY]=canvasMM(e);
       drag.p.poly[drag.i]=[mmX,mmY]; drag.moved=true; draw(); return;
@@ -905,7 +932,7 @@ $('cv').addEventListener('click', e=>{
     gp.piece.grain={x1, y1, x2:mmX, y2:mmY, angle:ang,
                     len:Math.hypot(mmX-x1,mmY-y1), manual:true};
     gp.piece._al=null;
-    S.grainPick=null;
+    S.grainPick=null; $('canvasWrap').classList.remove('picking');
     refreshPieceUI(); draw();
     setStatus(gp.piece.name+' grain set to '+fmt(ang,1)+'° by hand.');
     return;
@@ -1220,7 +1247,7 @@ function applyProject(proj, source){
   S.pieces.forEach(recalcBB);
   selectPiece(null);
   const pg=Math.min(Math.max(proj.viewPage||1,1),S.pdf.numPages);
-  showPage(pg).then(()=>{ fitPage(); refreshPieceUI(); draw();
+  showPage(pg).then(()=>{ fitPage(); refreshPieceUI(); draw(); if(S.pieces.length) foldSetupSections();
     setStatus('Restored '+S.pieces.length+' pieces from '+source+' (saved '
       +new Date(proj.savedAt).toLocaleString()+').'); });
 }
