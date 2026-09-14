@@ -1203,6 +1203,17 @@ function packSheets(pieces, bedX, bedY, gap, margin=5){
       }
     }
   }
+  // centre each bed's group on the bed — kinder to fabric taped at the edges
+  for(const s of sheets){
+    let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+    for(const it of s.items){
+      const f=fitInfo(it.p);
+      minX=Math.min(minX,it.x); minY=Math.min(minY,it.y);
+      maxX=Math.max(maxX,it.x+f.w); maxY=Math.max(maxY,it.y+f.h);
+    }
+    const dx=(bedX-(maxX-minX))/2-minX, dy=(bedY-(maxY-minY))/2-minY;
+    for(const it of s.items){ it.x+=dx; it.y+=dy; }
+  }
   return sheets;
 }
 function placedPoly(item){
