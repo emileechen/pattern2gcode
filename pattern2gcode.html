@@ -153,7 +153,6 @@
     <span id="edGrain"></span>
     <button id="edKeep"></button>
     <button id="edGrainBtn">Set grain</button>
-    <button id="edZoom">Zoom to</button>
     <button id="edReset" title="Restore the detected outline">Reset outline</button>
     <button id="edDone">Done</button>
     <span class="tip">Drag a point to move it · click a hollow midpoint to add one · double-click a point to remove it</span>
@@ -769,7 +768,7 @@ function selectPiece(p, opts={}){
   $('edKeep').className = p.on ? 'warn' : '';
   $('edReset').disabled = p.poly.length===p.poly0.length && p.poly.every((q,i)=>q[0]===p.poly0[i][0]&&q[1]===p.poly0[i][1]);
   refreshPieceUI();
-  if(opts.frame!==false) framePiece(p, opts.zoom);
+  if(opts.frame!==false) framePiece(p, opts.zoom!==false);   // selecting zooms to fit the piece
   draw();
 }
 /* scroll (and optionally zoom) so the piece is in view */
@@ -785,17 +784,12 @@ function framePiece(p, zoomTo){
   const pxPerMM=S.zoom/S.mmPerPx, cv=$('cv');
   const left=cv.offsetLeft+p.bb.minX*pxPerMM, top=cv.offsetTop+p.bb.minY*pxPerMM;
   const w=p.bb.w*pxPerMM, h=p.bb.h*pxPerMM;
-  const visible = left>=wrap.scrollLeft && left+w<=wrap.scrollLeft+wrap.clientWidth
-               && top>=wrap.scrollTop  && top+h<=wrap.scrollTop+wrap.clientHeight;
-  if(!visible || zoomTo){
-    wrap.scrollLeft=Math.round(left+w/2-wrap.clientWidth/2);
-    wrap.scrollTop =Math.round(top+h/2-wrap.clientHeight/2);
-  }
+  wrap.scrollLeft=Math.round(left+w/2-wrap.clientWidth/2);
+  wrap.scrollTop =Math.round(top+h/2-wrap.clientHeight/2);
 }
 $('edKeep').onclick=()=>{ if(S.sel){ S.sel.on=!S.sel.on; selectPiece(S.sel,{frame:false}); } };
 $('edName').onclick=()=>{ if(S.sel) renamePiece(S.sel); };
 $('edGrainBtn').onclick=()=>{ if(S.sel) startGrainPick(S.sel); };
-$('edZoom').onclick=()=>{ if(S.sel) framePiece(S.sel,true); };
 $('edReset').onclick=()=>{ const p=S.sel; if(!p) return;
   p.poly=p.poly0.map(q=>q.slice()); recalcBB(p); selectPiece(p,{frame:false});
   setStatus(p.name+' outline restored to the detected one.'); };
