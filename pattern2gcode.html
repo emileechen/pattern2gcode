@@ -61,7 +61,8 @@
   #editBar button:hover{background:var(--ink); color:var(--paper)}
   #editBar button.warn{border-color:var(--thread); color:var(--thread)}
   #editBar button.warn:hover{background:var(--thread); color:#fff}
-  .piece.sel{outline:2px solid var(--indigo); outline-offset:-1px}
+  .piece.sel{outline:2px solid var(--indigo); outline-offset:-1px; border-left-color:var(--indigo);
+    background:#EEF2F6; box-shadow:0 0 0 3px rgba(57,83,107,.18)}
   #pageNav{display:flex; align-items:center; gap:6px}
   #pageNav button, #canvasBar button.bar{
     border:1.5px solid var(--ink); background:#fff; border-radius:6px; padding:3px 10px;
@@ -223,12 +224,12 @@
     <div class="row"><label>Close outline gaps (mm)</label><input type="number" id="gapClose" value="1.0" min="0" max="6" step="0.5"></div>
     <button class="act" id="btnDetect" disabled>Detect pieces on included pages</button>
     <div class="note">Every closed outline becomes a piece. Tap a piece on the canvas to select it: the bar above the canvas lets you keep or drop it, rename it, set its grain, and nudge its outline points by hand. Labels, logos and stray shapes get dropped that way (names become file names).</div>
+    <button class="act ghost" id="btnOCR" disabled title="Read the label printed inside each kept piece and use it as the piece name">Read piece names (OCR)</button>
+    <div class="note">Reads the label printed inside each piece (e.g. <b>2d</b>) and names the piece after it. Loads the Tesseract OCR engine (~10 MB) from the internet the first time. Pieces you have renamed yourself are left alone.</div>
   </section>
 
   <section>
     <h2>3 · Pieces <small class="k" id="pieceCount"></small></h2>
-    <button class="act ghost" id="btnOCR" disabled title="Read the label printed inside each kept piece and use it as the piece name">Read piece names (OCR)</button>
-    <div class="note">Reads the label printed inside each piece (e.g. <b>2d</b>) and names the piece after it. Loads the Tesseract OCR engine (~10 MB) from the internet the first time. Pieces you have renamed yourself are left alone.</div>
     <div id="pieceList"><div class="note">No pieces yet.</div></div>
   </section>
 
@@ -310,8 +311,10 @@ document.querySelectorAll('aside section h2').forEach(h=>{
 /* once pieces exist, fold steps 1 and 2 away so the piece list gets the room */
 function foldSetupSections(){
   $('sum1').textContent = S.pdfInfo ? S.pdfInfo.name+' · '+S.pageInc.size+'/'+S.pdf.numPages+' pages' : '';
-  $('sum2').textContent = S.pieces.length ? S.pieces.length+' found' : '';
-  $('sec1').classList.add('collapsed'); $('sec2').classList.add('collapsed');
+  const namedN=S.pieces.filter(p=>p.label).length;
+  $('sum2').textContent = S.pieces.length ? S.pieces.length+' found'+(namedN?' · '+namedN+' named':'') : '';
+  $('sec1').classList.add('collapsed');
+  if(namedN) $('sec2').classList.add('collapsed');       // step 2 stays open until names are read
 }
 
 /* ---------------- PDF load & render ---------------- */
@@ -1159,7 +1162,13 @@ function refreshPieceUI(){
     card.querySelector('.bg').onclick=()=>startGrainPick(p);
     list.appendChild(card);
   }
-  const selCard=list.querySelector('.sel'); if(selCard) selCard.scrollIntoView({block:'nearest'});
+  const selCard=list.querySelector('.sel');
+  if(selCard){                                            // bring the selected card into the sidebar's view
+    const aside=document.querySelector('aside');
+    const a=aside.getBoundingClientRect(), c=selCard.getBoundingClientRect();
+    if(c.top<a.top+8 || c.bottom>a.bottom-8)
+      aside.scrollTop += (c.top+c.height/2) - (a.top+a.height/2);
+  }
   const any=S.pieces.some(p=>p.on);
   $('btnSVG').disabled=$('btnGcode').disabled=$('btnBeds').disabled=$('viewBeds').disabled=!any;
   if(!any && S.view==='beds') setView('page');
@@ -1528,6 +1537,7 @@ $('btnOCR').addEventListener('click', async ()=>{
     }
     const unsure=read.filter(p=>p.nameUnsure).length;
     refreshPieceUI(); draw(); if(S.sel) selectPiece(S.sel,{frame:false});
+    foldSetupSections();
     setStatus('Read names for '+named+' of '+targets.length+' pieces in '+fmt((performance.now()-t0)/1000,0)+' s'
       +(unsure?', '+unsure+' marked "name unsure"':'')
       +(unread.length?', '+unread.length+' with no name found — see "Needs attention"':'')+'.');
