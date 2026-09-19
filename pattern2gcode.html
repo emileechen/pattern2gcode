@@ -261,7 +261,7 @@
         <option value="235,235">235 × 235</option>
         <option value="250,210">250 × 210</option>
         <option value="256,256">256 × 256</option>
-        <option value="270,270" selected>270 × 270</option>
+        <option value="270,270" selected>270 × 270 (Snapmaker U1)</option>
         <option value="300,300">300 × 300</option>
         <option value="350,350">350 × 350</option>
         <option value="160,160">Snapmaker A150 · 160 × 160</option>
@@ -287,7 +287,8 @@
     <div class="row"><label>G-code flavour</label>
       <select id="flavour">
         <option value="marlin">Generic Marlin</option>
-        <option value="snapmaker">Snapmaker (Luban header)</option>
+        <option value="klipper">Klipper (Snapmaker U1 etc.)</option>
+        <option value="snapmaker">Snapmaker 2.0 / Artisan (Luban header)</option>
       </select>
     </div>
     <div class="note"><b>Fabric setup:</b> tape the fabric taut on all four sides, set Z offset ≈ fabric thickness, keep bed heat off or low. No purge line is generated (fabric covers the bed) — extrude a little by hand just before starting so the nozzle is primed.</div>
@@ -2156,6 +2157,7 @@ function makeSheetGcode(sheet, num, total, soloName){
       +', flow '+flow+', Z offset '+zoff+' mm',
     '; grain preserved: pieces keep PDF orientation (fabric grain along bed Y)',
     '; NOTE: no purge line (fabric covers the bed) — prime the nozzle by hand first.',
+    ...($('flavour').value==='klipper' ? ['T0             ; first tool head'] : []),
     'M83            ; relative extrusion',
     'G21            ; mm',
     'G90            ; absolute XY',

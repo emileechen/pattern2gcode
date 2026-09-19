@@ -28,7 +28,7 @@ The sidebar walks through five steps. You load a PDF, detect pieces, review and 
 
 | Setting | Default | Notes |
 |---|---|---|
-| Bed size | 270 × 270 | Presets for common printers and the Snapmaker A150/A250/A350/Artisan, or type custom values |
+| Bed size | 270 × 270 | Presets for common printers, the Snapmaker U1 (270 × 270) and the Snapmaker A150/A250/A350/Artisan, or type custom values |
 | Line width | 0.4 mm | Match your nozzle diameter |
 | Layer height | 0.2 mm | Height of each printed pass |
 | Passes | 1 | Extra passes retrace the same line higher for a stronger ridge |
@@ -40,7 +40,7 @@ The sidebar walks through five steps. You load a PDF, detect pieces, review and 
 | Nozzle temp | 210 °C | PLA; slightly hot helps bonding |
 | Bed temp | 0 (off) | Keep off or low so the fabric doesn't shrink or scorch |
 | Retraction | 1.0 mm | Applied at the end of each piece's loop |
-| G-code flavour | Generic Marlin | *Snapmaker (Luban header)* prepends the header block Snapmaker's touchscreen uses to recognise a 3D-print file and show its extent and time |
+| G-code flavour | Generic Marlin | *Klipper (Snapmaker U1 etc.)* adds a `T0` tool select at the start; *Snapmaker 2.0 / Artisan (Luban header)* prepends the header block those machines' touchscreens use to recognise a 3D-print file |
 
 **Sew-line extensions.** The cut line is only part of what a pattern says: seam lines, dart legs, fold lines and placement boxes all meet the outline somewhere, and knowing where those lines run is what you need on the fabric. Detection records every spot where an internal line reaches the outline, together with the line's direction there (both directions at a corner where two lines meet), and puts an outline vertex exactly at that point — shown as a red-ringed handle when editing. Each extension is anchored to its vertex, so dragging the corner moves the extension with it, and Reset outline restores both. Export then continues each line straight on through the cut line — by default 8 mm out into the scrap and 3 mm back over the line itself so the two register — which shows you where the line is and at what angle. The outside part is cut away; the overlap inside sits in the seam allowance and is hidden once sewn. An extension is clipped wherever it would otherwise run onto fabric that stays — its own piece where the outline is concave, or a neighbour — and dropped if nothing is left outside; packing spaces pieces (and the bed margin) by the extension length so extensions never reach another piece or leave the bed. Extensions show as blue marks on the canvas and in the bed preview, go into the SVGs and G-code, and the *Extend sew/fold lines* controls in Step 5 turn them off or change the two lengths. Only interior marks 3 mm or longer count, so text and speckle don't produce extensions.
 
@@ -50,7 +50,7 @@ The sidebar walks through five steps. You load a PDF, detect pieces, review and 
 
 ## Getting files onto the printer
 
-The G-code is plain Marlin and prints from any printer's usual file route — SD card, USB stick, OctoPrint, or the vendor app. On a **Snapmaker**, set *G-code flavour* to *Snapmaker (Luban header)* and pick the matching bed preset, then either copy the files to a FAT32 USB stick and open them from *Files → USB* on the touchscreen, or load them into Luban's *Workspace* and *Send to device* over Wi‑Fi, after which they appear under *Files → Local*. Calibrate the bed with no fabric on it, tape the fabric down, and let the tool's Z offset (= fabric thickness) do the rest — don't also add a live Z offset on the machine, or the two stack.
+The G-code is plain Marlin and prints from any printer's usual file route — SD card, USB stick, OctoPrint, or the vendor app. A **Snapmaker U1** runs Klipper with a Fluidd web interface: set *G-code flavour* to *Klipper*, open the printer's address in a browser (or the *Device* tab in Snapmaker Orca, which embeds it), upload the files in the G-code files panel, and start one from that list; a USB stick also works. Snapmaker Orca itself only sends jobs it has sliced, so an imported file can't be started from its Print button. On a **Snapmaker 2.0 or Artisan**, set the flavour to *Snapmaker 2.0 / Artisan (Luban header)* and pick the matching bed preset, then either copy the files to a FAT32 USB stick and open them from *Files → USB* on the touchscreen, or load them into Luban's *Workspace* and *Send to device* over Wi‑Fi, after which they appear under *Files → Local*. Calibrate the bed with no fabric on it, tape the fabric down, and let the tool's Z offset (= fabric thickness) do the rest — don't also add a live Z offset on the machine, or the two stack.
 
 ## Printing on fabric
 
