@@ -276,6 +276,10 @@
     <div class="row"><label>Line width (mm)</label><input type="number" id="lineW" value="0.4" step="0.05"></div>
     <div class="row"><label>Layer height (mm)</label><input type="number" id="layerH" value="0.2" step="0.02"></div>
     <div class="row"><label>Passes</label><input type="number" id="nLayers" value="1" min="1" max="5"></div>
+    <div class="row"><label>Cut-line width (lines side by side)</label><input type="number" id="nWide" value="1" min="1" max="4"></div>
+    <div class="note">More than 1 prints the cut line as a band; cut down its middle and both cut edges keep plastic in the weave, which resists fraying.</div>
+    <div class="row"><label>Sandwich: print under the fabric, pause, then over</label><input type="checkbox" id="sandwich"></div>
+    <div class="note">Prints every line on the bare bed first, then pauses so you can lay the fabric over the lines and secure it, then prints the same lines again on top — plastic on both faces, fibres locked between, with no re-registration because the bed never moves. Level on the <b>bare bed</b> for this, and set <b>Z offset</b> to the fabric thickness plus one layer height (the under-line). Bed at 40–45 °C keeps the under-lines soft enough to fuse and lightly stuck (60 °C makes them stay on the plate); let it cool fully before peeling. Resume from the touchscreen once the fabric is on.</div>
     <div class="row"><label>Z offset = fabric (mm)</label><input type="number" id="zOff" value="0.20" step="0.05"></div>
     <div class="row"><label>Print speed (mm/s)</label><input type="number" id="speed" value="18" min="3" max="80"></div>
     <div class="row"><label>Travel speed (mm/s)</label><input type="number" id="travel" value="120" min="20" max="300" step="10"></div>
@@ -2145,6 +2149,24 @@ $('btnGcode').addEventListener('click', ()=>{
     +(skipped?' — '+skipped+' skipped (too big for bed)':'')+'.');
 });
 
+/* offset a closed polygon by d mm (positive = outward), averaged vertex normals */
+function offsetPoly(pts, d){
+  const n=pts.length; if(n<3||Math.abs(d)<1e-6) return pts;
+  let area=0; for(let i=0;i<n;i++){ const [x1,y1]=pts[i],[x2,y2]=pts[(i+1)%n]; area+=x1*y2-x2*y1; }
+  const sgn=area>0?1:-1;                          // orientation → which side is outward
+  const out=[];
+  for(let i=0;i<n;i++){
+    const [ax,ay]=pts[(i+n-1)%n],[bx,by]=pts[i],[cx,cy]=pts[(i+1)%n];
+    let n1x=(by-ay),n1y=-(bx-ax); let L=Math.hypot(n1x,n1y)||1e-9; n1x/=L; n1y/=L;
+    let n2x=(cy-by),n2y=-(cx-bx); L=Math.hypot(n2x,n2y)||1e-9; n2x/=L; n2y/=L;
+    let nx=n1x+n2x, ny=n1y+n2y; L=Math.hypot(nx,ny);
+    if(L<1e-6){ nx=n1x; ny=n1y; L=1; }
+    nx/=L; ny/=L;
+    const cosHalf=Math.max(0.5, nx*n1x+ny*n1y);   // miter, limited to 2× at sharp corners
+    out.push([bx+sgn*nx*d/cosHalf, by+sgn*ny*d/cosHalf]);
+  }
+  return out;
+}
 function makeSheetGcode(sheet, num, total, soloName){
   const bedX=+$('bedX').value, bedY=+$('bedY').value;
   const lw=+$('lineW').value, lh=+$('layerH').value, layers=+$('nLayers').value;
@@ -2174,13 +2196,28 @@ function makeSheetGcode(sheet, num, total, soloName){
     'G92 E0');
   const hop=Math.max(1, lh+0.6);
 
+  const nWide=Math.max(1,+$('nWide').value||1), sandwich=$('sandwich').checked, flavour=$('flavour').value;
+  const wideOffsets=[]; for(let k=0;k<nWide;k++) wideOffsets.push((k-(nWide-1)/2)*lw);
+  // stages: sandwich prints everything on the bare bed first (Z offset 0),
+  // pauses for the fabric, then prints it again at the set Z offset
+  const stages = sandwich ? [{label:'under the fabric', zo:0},{label:'over the fabric', zo:zoff}] : [{label:'', zo:zoff}];
+  stages.forEach((stage, si)=>{
+  if(si>0){
+    G.push('; ==== PAUSE: lay the fabric over the printed lines, secure it, then resume ====',
+      'G0 Z'+gnum(zoff+layers*lh+30)+' F1200', 'G0 X5 Y'+gnum(bedY-10)+' F'+travel,
+      'M117 Lay fabric over the lines, then resume',
+      flavour==='klipper' ? 'PAUSE' : 'M0 Lay fabric over the lines, then resume',
+      'M109 S'+tNoz+'   ; make sure the nozzle is back to temperature');
+  }
   for(let l=1;l<=layers;l++){
-    const z=zoff+l*lh;
-    G.push('; ==== pass '+l+'/'+layers+'  Z='+gnum(z)+' ====');
+    const z=stage.zo+l*lh;
+    G.push('; ==== pass '+l+'/'+layers+(stage.label?' '+stage.label:'')+'  Z='+gnum(z)+' ====');
     for(const it of sheet.items){
-      let pts=placedPoly(it);
-      if(it.centre){          // single-piece mode: centre on bed
-        const xs=pts.map(q=>q[0]), ys=pts.map(q=>q[1]);
+      let pts0=placedPoly(it);
+      for(const wo of wideOffsets){
+      let pts=offsetPoly(pts0, wo);
+      if(it.centre){          // single-piece mode: centre on bed (by the unoffset outline, so bands stay concentric)
+        const xs=pts0.map(q=>q[0]), ys=pts0.map(q=>q[1]);
         const w=Math.max(...xs), h=Math.max(...ys);
         pts=pts.map(([x,y])=>[x+(bedX-w)/2, y+(bedY-h)/2]);
       }
@@ -2206,6 +2243,7 @@ function makeSheetGcode(sheet, num, total, soloName){
       }
       if(retr) G.push('G1 E-'+gnum(retr)+' F1800 ; retract');
       G.push('G0 Z'+gnum(z+hop)+' F1200');
+      if(wo!==wideOffsets[wideOffsets.length-1]) continue;   // extensions once per piece
       ticks=ticks.filter(seg=>seg.every(([x,y])=>x>=0&&x<=bedX&&y>=0&&y<=bedY));   // never off the bed
       if(ticks.length){
         G.push('; sew-line extensions ('+ticks.length+')');
@@ -2219,8 +2257,10 @@ function makeSheetGcode(sheet, num, total, soloName){
           G.push('G0 Z'+gnum(z+hop)+' F1200');
         }
       }
+      }   // wide offsets
     }
   }
+  });  // stages
   G.push('; ---- done ----','M104 S0', tBed>0?'M140 S0':';',
     'G91','G0 Z12 F1200','G90',
     'G0 X5 Y'+gnum(bedY-10)+' F'+travel+' ; present','M84','');
@@ -2462,7 +2502,7 @@ $('btnOCR').addEventListener('click', async ()=>{
 /* ---------------- project save / load / autosave ---------------- */
 const PROJECT_FORMAT='pattern2gcode-project', PROJECT_VERSION=1;
 const SETTING_IDS=['dpiSel','thr','minPiece','gapClose','bedPreset','bedX','bedY','lineW','layerH','flavour',
-  'nLayers','zOff','speed','travel','flow','filD','tNoz','tBed','retr','alignGrain','pack','gap','autoRot','tickOn','tickOut','tickIn'];
+  'nLayers','nWide','sandwich','zOff','speed','travel','flow','filD','tNoz','tBed','retr','alignGrain','pack','gap','autoRot','tickOn','tickOut','tickIn'];
 const AUTOSAVE_KEY=h=>'p2g:'+h;
 
 async function hashBytes(buf){
