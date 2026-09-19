@@ -32,7 +32,7 @@ The sidebar walks through five steps. You load a PDF, detect pieces, review and 
 | Line width | 0.4 mm | Match your nozzle diameter |
 | Layer height | 0.2 mm | Height of each printed pass |
 | Passes | 1 | Extra passes retrace the same line higher for a stronger ridge |
-| Z offset | 0.20 mm | Set to your fabric's thickness — this is the critical number |
+| Z offset | 0.20 mm | How far above the levelled surface the first pass prints — the critical number; find it with the Z-offset test below |
 | Print speed | 18 mm/s | Slow and clean; thin lines on fabric don't like speed |
 | Travel speed | 120 mm/s | Moves between pieces |
 | Flow multiplier | 1.10 | Slight over-extrusion helps the line grip the weave |
@@ -54,9 +54,11 @@ The G-code is plain Marlin and prints from any printer's usual file route — SD
 
 ## Printing on fabric
 
-Tape the fabric taut to the bed on all four sides, with its grain running along the bed's Y axis (front to back) — that single convention is what makes every exported piece land grain-true. The nozzle presses molten plastic into the weave at fabric height, which is why the Z offset must match the fabric thickness: too low and the nozzle drags and snags, too high and the line sits on top and peels off. No purge or prime line is generated, because fabric covers the bed where one would go — extrude a few millimeters of filament by hand just before starting each print so the nozzle is already flowing. The generated G-code heats the nozzle (and bed if enabled), homes, prints every piece's loop for each pass with Z-hops on travel moves, then lifts, parks, and disables motors.
+Hold the fabric taut on the bed on all four sides — magnets on a steel plate work well and are easy to reposition; tape otherwise — with its grain running along the bed's Y axis (front to back) — that single convention is what makes every exported piece land grain-true. Keep the magnets or tape outside the packed area (the bed preview shows it) and low enough that the nozzle clears them on travel moves. The nozzle presses molten plastic into the weave at fabric height, which is why the Z offset matters: too low and the nozzle drags and snags, too high and the line sits on top and peels off.
 
-Dial in your first print on scrap fabric: one small sheet, checking that lines bond without distorting the cloth. Adjust Z offset first, then flow, then temperature, in that order.
+**Finding the Z offset.** Don't measure the cloth; print the **Z-offset test** from Step 4 instead. It lays eight 40 mm lines side by side across the bed centre, front to back, each at a different Z offset between the two values you set, using your current line, flow and temperature settings. Pick the line that sits in the weave without the nozzle dragging or the line floating, and type its offset into *Z offset*. What range to test depends on how you levelled: with the fabric already on the bed and a nozzle-contact probe, the printer has measured the cloth's surface and the right offset is small (test 0–0.3 mm); levelled on the bare bed, the offset has to make up the fabric thickness (test around your guess, e.g. 0.2–0.9 mm for dress-weight cotton). No purge or prime line is generated, because fabric covers the bed where one would go — extrude a few millimeters of filament by hand just before starting each print so the nozzle is already flowing. The generated G-code heats the nozzle (and bed if enabled), homes, prints every piece's loop for each pass with Z-hops on travel moves, then lifts, parks, and disables motors.
+
+Then dial in on scrap fabric: one small piece (Drop all, keep one), checking that lines bond without distorting the cloth. Adjust flow, then temperature, if the Z-offset test alone doesn't get you there.
 
 ## Troubleshooting
 

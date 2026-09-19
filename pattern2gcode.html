@@ -291,7 +291,11 @@
         <option value="snapmaker">Snapmaker 2.0 / Artisan (Luban header)</option>
       </select>
     </div>
-    <div class="note"><b>Fabric setup:</b> tape the fabric taut on all four sides, set Z offset ≈ fabric thickness, keep bed heat off or low. No purge line is generated (fabric covers the bed) — extrude a little by hand just before starting so the nozzle is primed.</div>
+    <div class="note"><b>Fabric setup:</b> hold the fabric taut on all four sides — magnets on a steel bed, or tape — keeping them well outside the printed area, and keep bed heat off or low. No purge line is generated (fabric covers the bed) — extrude a little by hand just before starting so the nozzle is primed.</div>
+    <div class="row"><label>Z-offset test: from (mm)</label><input type="number" id="ztFrom" value="0.00" step="0.05"></div>
+    <div class="row"><label>to (mm), 8 lines</label><input type="number" id="ztTo" value="0.70" step="0.05"></div>
+    <button class="act ghost" id="btnZTest" disabled>Download Z-offset test</button>
+    <div class="note">Prints eight 40 mm lines side by side, each at a different Z offset from the first value to the second, with the settings above. Print it on the fabric you'll use, pick the line that sits in the weave without dragging or floating, and type its offset into <b>Z offset</b>. Levelled with the fabric already taped down? Test 0–0.3 mm. Levelled on the bare bed? Test around the fabric's thickness.</div>
   </section>
 
   <section>
@@ -390,7 +394,7 @@ $('fileInput').addEventListener('change', async e=>{
     $('sum1').textContent=''; $('sum2').textContent='';
     await showPage(1);
     $('btnFit').disabled=false; $('viewPage').disabled=false; fitPage();
-    $('btnDetect').disabled = false; $('btnSaveProj').disabled = $('btnSaveTop').disabled = false;
+    $('btnDetect').disabled = false; $('btnSaveProj').disabled = $('btnSaveTop').disabled = false; $('btnZTest').disabled=false;
     setStatus('PDF loaded — '+S.pdf.numPages+' pages, all included. Untick pages to omit them, then detect.');
     // a project loaded before its PDF, or autosaved work for this PDF?
     if(S.pendingProject){
@@ -1961,6 +1965,7 @@ function refreshPieceUI(){
   }
   const any=S.pieces.some(p=>p.on);
   $('btnSVG').disabled=$('btnGcode').disabled=$('btnBeds').disabled=$('viewBeds').disabled=!any;
+  $('btnZTest').disabled=!S.pdf && !S.pieces.length;
   if(!any && S.view==='beds') setView('page');
   if(S.imgCanvas) draw();                                  // bed/packing settings may have changed
   scheduleAutosave();
@@ -2248,6 +2253,34 @@ function makeSheetGcode(sheet, num, total, soloName){
   }
   return G.join('\n');
 }
+
+/* Z-offset test strip: N short lines across the bed centre, each at its own
+   Z offset, printed with the current settings so the result transfers */
+$('btnZTest').addEventListener('click', ()=>{
+  const bedX=+$('bedX').value, bedY=+$('bedY').value, N=8, len=40, pitch=8;
+  const z0=+$('ztFrom').value, z1=+$('ztTo').value, lh=+$('layerH').value;
+  const zoffSaved=$('zOff').value;
+  // build a synthetic sheet: one straight "piece" per line, then patch each
+  // line's Z in the output
+  const items=[]; const x0=(bedX-len)/2, yStart=(bedY-(N-1)*pitch)/2;
+  for(let i=0;i<N;i++){
+    const y=yStart+(N-1-i)*pitch, poly=[[0,0],[len,0],[len,0.01],[0,0.01]];   // layout y-down: lowest offset ends up at the front
+    items.push({p:{name:'z'+(z0+(z1-z0)*i/(N-1)).toFixed(2), poly, bb:{minX:0,minY:0,maxX:len,maxY:0.01,w:len,h:0.01}, grain:null, ticks:[], on:true, _al:null}, x:x0, y:y, rot:false});
+  }
+  $('zOff').value='0';
+  let g=makeSheetGcode({items}, 1, 1, 'Z-offset test '+z0+'–'+z1+' mm');
+  $('zOff').value=zoffSaved;
+  // patch: each piece's Z (set right after its travel) → its own offset
+  let idx=-1;
+  g=g.split('\n').map(line=>{
+    if(/^; ---- done/.test(line)) idx=-1;
+    if(/^; ---- z/.test(line)){ idx++; return line+' (Z offset '+(z0+(z1-z0)*idx/(N-1)).toFixed(2)+' mm)'; }
+    if(idx>=0){ const m=line.match(/^(G[01]) Z([\d.]+)(.*)$/); if(m){ const z=+m[2]; const zo=z0+(z1-z0)*idx/(N-1); return m[1]+' Z'+gnum(z+zo)+m[3]; } }
+    return line;
+  }).join('\n');
+  download('z-offset-test.gcode', g, 'text/plain');
+  setStatus('Z-offset test downloaded: 8 lines from '+z0+' to '+z1+' mm, front to back.');
+});
 
 /* ---------------- piece names via OCR ---------------- */
 const OCR_DPI=150, OCR_SRC='https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/7.0.0/tesseract.min.js';
