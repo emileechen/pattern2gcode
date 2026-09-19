@@ -237,6 +237,10 @@
     <h2>3 · Pieces <small class="k" id="pieceCount"></small></h2>
     <button class="act ghost" id="btnReview" disabled style="margin:0 0 8px">Review grain</button>
     <div class="note">Steps through every kept piece whose grain arrow hasn't been checked: look at the arrow, press <b>Enter</b> to confirm and move on, or use Set grain to tap it in yourself.</div>
+    <div style="display:flex;gap:8px;margin:0 0 10px">
+      <button class="act ghost" id="btnKeepAll" disabled style="margin:0;flex:1;width:auto;padding:7px 10px;font-size:13.5px">Keep all</button>
+      <button class="act ghost" id="btnDropAll" disabled style="margin:0;flex:1;width:auto;padding:7px 10px;font-size:13.5px" title="Drop every piece, then Keep the one or two you want to test-print">Drop all</button>
+    </div>
     <div id="pieceList"><div class="note">No pieces yet.</div></div>
   </section>
 
@@ -1208,6 +1212,8 @@ function setView(v, refit=true){
   if(changed && refit) fitPage(); else draw();
 }
 $('btnReview').addEventListener('click', ()=>reviewNext(S.sel));
+$('btnKeepAll').addEventListener('click', ()=>{ S.pieces.forEach(p=>p.on=true); if(S.sel) selectPiece(S.sel,{frame:false}); else { refreshPieceUI(); draw(); } setStatus('All '+S.pieces.length+' pieces kept.'); });
+$('btnDropAll').addEventListener('click', ()=>{ S.pieces.forEach(p=>p.on=false); if(S.sel) selectPiece(S.sel,{frame:false}); else { refreshPieceUI(); draw(); } setStatus('All pieces dropped — tap a piece and Keep it to export just that one.'); });
 $('viewPage').addEventListener('click', ()=>setView('page'));
 $('viewBeds').addEventListener('click', ()=>setView('beds'));
 $('btnBeds').addEventListener('click', ()=>setView('beds'));
@@ -1832,6 +1838,7 @@ function refreshPieceUI(){
   $('btnOCR').disabled=!S.pieces.length;
   { const left=S.pieces.filter(grainPending).length;
     $('btnReview').disabled=!left;
+    $('btnKeepAll').disabled=!S.pieces.some(p=>!p.on); $('btnDropAll').disabled=!S.pieces.some(p=>p.on);
     $('btnReview').textContent = left ? 'Review grain — '+left+' to check' : 'Grain reviewed ✓'; }
   if(!S.pieces.length){
     list.innerHTML='<div class="note">No pieces yet.</div>';
