@@ -264,6 +264,10 @@
         <option value="270,270" selected>270 × 270</option>
         <option value="300,300">300 × 300</option>
         <option value="350,350">350 × 350</option>
+        <option value="160,160">Snapmaker A150 · 160 × 160</option>
+        <option value="230,250">Snapmaker A250 · 230 × 250</option>
+        <option value="320,350">Snapmaker A350 · 320 × 350</option>
+        <option value="400,400">Snapmaker Artisan · 400 × 400</option>
         <option value="custom">Custom…</option>
       </select>
     </div>
@@ -280,6 +284,12 @@
     <div class="row"><label>Nozzle temp (°C)</label><input type="number" id="tNoz" value="210" step="5"></div>
     <div class="row"><label>Bed temp (°C, 0 = off)</label><input type="number" id="tBed" value="0" min="0" max="110" step="5"></div>
     <div class="row"><label>Retraction (mm)</label><input type="number" id="retr" value="1.0" min="0" max="8" step="0.5"></div>
+    <div class="row"><label>G-code flavour</label>
+      <select id="flavour">
+        <option value="marlin">Generic Marlin</option>
+        <option value="snapmaker">Snapmaker (Luban header)</option>
+      </select>
+    </div>
     <div class="note"><b>Fabric setup:</b> tape the fabric taut on all four sides, set Z offset ≈ fabric thickness, keep bed heat off or low. No purge line is generated (fabric covers the bed) — extrude a little by hand just before starting so the nozzle is primed.</div>
   </section>
 
@@ -2207,6 +2217,33 @@ function makeSheetGcode(sheet, num, total, soloName){
   G.push('; ---- done ----','M104 S0', tBed>0?'M140 S0':';',
     'G91','G0 Z12 F1200','G90',
     'G0 X5 Y'+gnum(bedY-10)+' F'+travel+' ; present','M84','');
+  if($('flavour').value==='snapmaker'){
+    // Luban-style header: the touchscreen uses it to recognise a 3D-print
+    // file and to show its extent and estimated time
+    let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9,dist=0,px=null,py=null;
+    for(const line of G){
+      const m=line.match(/^G[01] X([\d.]+) Y([\d.]+)/); if(!m) continue;
+      const x=+m[1], y=+m[2]; minX=Math.min(minX,x); maxX=Math.max(maxX,x); minY=Math.min(minY,y); maxY=Math.max(maxY,y);
+      if(px!==null) dist+=Math.hypot(x-px,y-py); px=x; py=y;
+    }
+    const est=Math.round(dist/(+$('speed').value)*1.4)+60;
+    const header=[
+      ';Header Start',
+      ';header_type: 3dp',
+      ';tool_head: singleExtruderToolheadForSM2',
+      ';machine: '+(bedX===160?'A150':bedX===230?'A250':bedX===320?'A350':bedX===400?'Artisan':'Custom'),
+      ';gcode_flavor: marlin',
+      ';renderMethod: line',
+      ';file_total_lines: '+(G.length+20),
+      ';estimated_time(s): '+est,
+      ';nozzle_temperature(°C): '+tNoz,
+      ';build_plate_temperature(°C): '+tBed,
+      ';work_speed(mm/minute): '+speed,
+      ';max_x(mm): '+gnum(maxX), ';max_y(mm): '+gnum(maxY), ';max_z(mm): '+gnum(zoff+layers*lh+hop),
+      ';min_x(mm): '+gnum(minX), ';min_y(mm): '+gnum(minY), ';min_z(mm): 0',
+      ';Header End'];
+    return header.concat(G).join('\n');
+  }
   return G.join('\n');
 }
 
@@ -2389,7 +2426,7 @@ $('btnOCR').addEventListener('click', async ()=>{
 
 /* ---------------- project save / load / autosave ---------------- */
 const PROJECT_FORMAT='pattern2gcode-project', PROJECT_VERSION=1;
-const SETTING_IDS=['dpiSel','thr','minPiece','gapClose','bedPreset','bedX','bedY','lineW','layerH',
+const SETTING_IDS=['dpiSel','thr','minPiece','gapClose','bedPreset','bedX','bedY','lineW','layerH','flavour',
   'nLayers','zOff','speed','travel','flow','filD','tNoz','tBed','retr','alignGrain','pack','gap','autoRot','tickOn','tickOut','tickIn'];
 const AUTOSAVE_KEY=h=>'p2g:'+h;
 

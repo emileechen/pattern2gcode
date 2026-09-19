@@ -28,7 +28,7 @@ The sidebar walks through five steps. You load a PDF, detect pieces, review and 
 
 | Setting | Default | Notes |
 |---|---|---|
-| Bed size | 270 × 270 | Presets for common printers, or type custom values |
+| Bed size | 270 × 270 | Presets for common printers and the Snapmaker A150/A250/A350/Artisan, or type custom values |
 | Line width | 0.4 mm | Match your nozzle diameter |
 | Layer height | 0.2 mm | Height of each printed pass |
 | Passes | 1 | Extra passes retrace the same line higher for a stronger ridge |
@@ -40,12 +40,17 @@ The sidebar walks through five steps. You load a PDF, detect pieces, review and 
 | Nozzle temp | 210 °C | PLA; slightly hot helps bonding |
 | Bed temp | 0 (off) | Keep off or low so the fabric doesn't shrink or scorch |
 | Retraction | 1.0 mm | Applied at the end of each piece's loop |
+| G-code flavour | Generic Marlin | *Snapmaker (Luban header)* prepends the header block Snapmaker's touchscreen uses to recognise a 3D-print file and show its extent and time |
 
 **Sew-line extensions.** The cut line is only part of what a pattern says: seam lines, dart legs, fold lines and placement boxes all meet the outline somewhere, and knowing where those lines run is what you need on the fabric. Detection records every spot where an internal line reaches the outline, together with the line's direction there (both directions at a corner where two lines meet), and puts an outline vertex exactly at that point — shown as a red-ringed handle when editing. Each extension is anchored to its vertex, so dragging the corner moves the extension with it, and Reset outline restores both. Export then continues each line straight on through the cut line — by default 8 mm out into the scrap and 3 mm back over the line itself so the two register — which shows you where the line is and at what angle. The outside part is cut away; the overlap inside sits in the seam allowance and is hidden once sewn. An extension is clipped wherever it would otherwise run onto fabric that stays — its own piece where the outline is concave, or a neighbour — and dropped if nothing is left outside; packing spaces pieces (and the bed margin) by the extension length so extensions never reach another piece or leave the bed. Extensions show as blue marks on the canvas and in the bed preview, go into the SVGs and G-code, and the *Extend sew/fold lines* controls in Step 5 turn them off or change the two lengths. Only interior marks 3 mm or longer count, so text and speckle don't produce extensions.
 
 **Step 5 — Export.** Three toggles shape the output. *Rotate pieces so grain runs vertical* (on by default) applies each piece's grain correction. *Pack several pieces per bed* groups kept pieces onto as few beds as possible, translation-only so grain stays true. Packing is shape-aware: pieces are placed largest first at the first free spot, and a spot is free when the outline keeps the spacing you set from every other outline (curved pieces nest into each other) and no sew-line extension crosses another piece — extensions themselves only need to clear other pieces, not keep the spacing. Outlines stay 5 mm from the bed edge, each bed's group is centred on the bed, and an extension that would run off the bed is simply not printed; pieces that fit the bed but not inside the margins get a bed of their own, centered. *Rotate 90° if needed to fit* is off by default because a 90° turn breaks grain direction — only enable it for pieces where grain genuinely doesn't matter, and the piece card and the G-code both warn when it happens.
 
 **Preview bed layout** (or the **Beds** toggle above the canvas) shows every bed as it will print: pieces placed to scale with their names, the 5 mm margin guide, pieces that needed the grain-breaking 90° turn tinted red, and the count of any skipped as too big. It re-packs live as you change bed size, spacing, packing or rotation options, and tapping a piece there selects it just like on the page; **Page** goes back to the pattern for editing. With packing on, the G-code button downloads one `sheet-N.gcode` per bed and the SVG button downloads a matching `sheet-N.svg` for each: a drawing of the bed with every piece's outline and name placed exactly where it will print, so you can check fabric coverage before starting. With packing off you get one file per piece, centered on the bed. Pieces larger than the bed in every allowed orientation are skipped: they're flagged "too big" in the list and drawn hatched with a grey outline on the page, so you can see at a glance which ones the current bed can't take — trace those by hand or from their SVG.
+
+## Getting files onto the printer
+
+The G-code is plain Marlin and prints from any printer's usual file route — SD card, USB stick, OctoPrint, or the vendor app. On a **Snapmaker**, set *G-code flavour* to *Snapmaker (Luban header)* and pick the matching bed preset, then either copy the files to a FAT32 USB stick and open them from *Files → USB* on the touchscreen, or load them into Luban's *Workspace* and *Send to device* over Wi‑Fi, after which they appear under *Files → Local*. Calibrate the bed with no fabric on it, tape the fabric down, and let the tool's Z offset (= fabric thickness) do the rest — don't also add a live Z offset on the machine, or the two stack.
 
 ## Printing on fabric
 
