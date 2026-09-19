@@ -241,6 +241,15 @@
       <button class="act ghost" id="btnKeepAll" disabled style="margin:0;flex:1;width:auto;padding:7px 10px;font-size:13.5px">Keep all</button>
       <button class="act ghost" id="btnDropAll" disabled style="margin:0;flex:1;width:auto;padding:7px 10px;font-size:13.5px" title="Drop every piece, then Keep the one or two you want to test-print">Drop all</button>
     </div>
+    <div style="display:flex;gap:8px;margin:0 0 8px;align-items:center">
+      <input type="search" id="pieceFind" placeholder="Find by name…" style="flex:1;padding:6px 8px;border:1px solid var(--seam);border-radius:6px;font:inherit;font-size:13.5px;background:#fff;min-width:0">
+      <select id="pieceSort" style="padding:6px 6px;border:1px solid var(--seam);border-radius:6px;font:inherit;font-size:13px;background:#fff" title="List order">
+        <option value="attention">Needs attention first</option>
+        <option value="name">Name</option>
+        <option value="position">Position on page</option>
+        <option value="size">Largest first</option>
+      </select>
+    </div>
     <div id="pieceList"><div class="note">No pieces yet.</div></div>
   </section>
 
@@ -1212,6 +1221,8 @@ function setView(v, refit=true){
   if(changed && refit) fitPage(); else draw();
 }
 $('btnReview').addEventListener('click', ()=>reviewNext(S.sel));
+$('pieceFind').addEventListener('input', refreshPieceUI);
+$('pieceSort').addEventListener('change', refreshPieceUI);
 $('btnKeepAll').addEventListener('click', ()=>{ S.pieces.forEach(p=>p.on=true); if(S.sel) selectPiece(S.sel,{frame:false}); else { refreshPieceUI(); draw(); } setStatus('All '+S.pieces.length+' pieces kept.'); });
 $('btnDropAll').addEventListener('click', ()=>{ S.pieces.forEach(p=>p.on=false); if(S.sel) selectPiece(S.sel,{frame:false}); else { refreshPieceUI(); draw(); } setStatus('All pieces dropped — tap a piece and Keep it to export just that one.'); });
 $('viewPage').addEventListener('click', ()=>setView('page'));
@@ -1870,15 +1881,32 @@ function refreshPieceUI(){
     const fit=fitInfo(p);
     return (grainPending(p) || fit.rot || p.nameUnsure || p.nameMissing) ? 0 : 1;   // too big is informational
   };
+  const mode=$('pieceSort').value, find=$('pieceFind').value.trim().toLowerCase();
+  // natural name order: numbers compare numerically, so 2d < 10c < 14/1g
+  const natKey=n=>n.toLowerCase().replace(/\d+/g, m=>m.padStart(6,'0'));
+  // reading order: rows of pieces (bboxes overlapping in y), left to right
+  const rowOf=new Map();
+  for(const pg of new Set(S.pieces.map(p=>p.page))){
+    const ps=S.pieces.filter(p=>p.page===pg).sort((a,b)=>a.bb.minY-b.bb.minY);
+    let row=0, rowBottom=-1;
+    for(const p of ps){ if(p.bb.minY>rowBottom-p.bb.h*0.3){ row++; rowBottom=p.bb.maxY; } else rowBottom=Math.max(rowBottom,p.bb.maxY); rowOf.set(p,row); }
+  }
+  const byPos=(a,b)=>(a.p.page-b.p.page)||(rowOf.get(a.p)-rowOf.get(b.p))||(a.p.bb.minX-b.p.bb.minX);
+  const cmp = mode==='name' ? (a,b)=>natKey(a.p.name).localeCompare(natKey(b.p.name))
+            : mode==='size' ? (a,b)=>(b.p.bb.w*b.p.bb.h)-(a.p.bb.w*a.p.bb.h)
+            : mode==='position' ? byPos
+            : (a,b)=>(a.g-b.g)||byPos(a,b);
   const ordered=S.pieces.map((p,i)=>({p,i,g:group(p)}))
-    .sort((a,b)=>(a.g-b.g)||(a.i-b.i));
-  const nProblem=ordered.filter(o=>o.g===0).length;
+    .filter(o=>!find || o.p.name.toLowerCase().includes(find) || (o.p.label||'').toLowerCase().includes(find))
+    .sort(cmp);
+  const nProblem=S.pieces.filter(p=>group(p)===0).length;
   if(nProblem) $('pieceCount').textContent += ' · '+nProblem+' need attention';
+  if(find && !ordered.length){ const d=document.createElement('div'); d.className='note'; d.textContent='No piece matches "'+$('pieceFind').value.trim()+'".'; list.appendChild(d); }
   let lastG=-1;
   const divider=t=>{ const d=document.createElement('div'); d.className='note'; d.style.margin='6px 0 2px';
     d.style.fontWeight='600'; d.textContent=t; list.appendChild(d); };
   for(const {p,g} of ordered){
-    if(g!==lastG){
+    if(mode==='attention' && g!==lastG){
       lastG=g;
       if(g===0) divider('Needs attention — '+nProblem);
       else if(g===1 && nProblem) divider('Ready');
