@@ -1424,11 +1424,30 @@ function draw(){
       }
       ctx.restore();
     }
-    // name tag
-    const tx=(p.bb.minX)*pxPerMM+4, ty=(p.bb.minY)*pxPerMM+14;
-    ctx.font='600 12px system-ui'; 
+    // name tag: inside the piece, centred on the first chord near the top
+    // that is wide enough for it (a round piece's bbox corner is empty space)
+    const label=p.name+(tooBig?' · too big for bed':'');
+    ctx.font='600 12px system-ui';
+    const lw=ctx.measureText(label).width/pxPerMM+4;         // mm needed
+    let tx=null, ty=null;
+    for(let y=p.bb.minY+4; y<p.bb.minY+p.bb.h*0.6 && tx===null; y+=2){
+      const xs=[];
+      for(let i=0,j=p.poly.length-1;i<p.poly.length;j=i++){
+        const [xi,yi]=p.poly[i], [xj,yj]=p.poly[j];
+        if((yi>y)!==(yj>y)) xs.push((xj-xi)*(y-yi)/(yj-yi)+xi);
+      }
+      xs.sort((a,b)=>a-b);
+      let best=null;
+      for(let k=0;k+1<xs.length;k+=2) if(xs[k+1]-xs[k]>=lw && (!best||xs[k+1]-xs[k]>best[1]-best[0])) best=[xs[k],xs[k+1]];
+      if(best){ tx=(best[0]+best[1])/2*pxPerMM; ty=y*pxPerMM+10; }
+    }
+    if(tx===null){ tx=(p.bb.minX+p.bb.w/2)*pxPerMM; ty=(p.bb.minY)*pxPerMM+14; }   // very narrow piece: over the top
+    ctx.textAlign='center';
+    ctx.lineWidth=3; ctx.strokeStyle='rgba(255,255,255,.85)'; ctx.lineJoin='round';
+    ctx.strokeText(label, tx, ty);
     ctx.fillStyle=tooBig?'#8a7f6d':(p.on?'#B3402F':'#a49c8d');
-    ctx.fillText(p.name+(tooBig?' · too big for bed':''), tx, ty);
+    ctx.fillText(label, tx, ty);
+    ctx.textAlign='start';
   }
   $('canvasHint').textContent = S.pieces.length
     ? (S.sel ? (handlesVisible(S.sel, pxPerMM)?'Editing '+S.sel.name+' · click an anchor to show its handles · tap elsewhere to deselect':'Zoom in to edit '+S.sel.name+"'s points")
